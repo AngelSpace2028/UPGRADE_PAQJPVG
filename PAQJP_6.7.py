@@ -747,7 +747,7 @@ class PAQJPCompressor:
         for _ in range(repeat):
             for i in range(len(transformed)):
                 fib_value = self.fibonacci[i % fib_length] % 256
-                transformed[K] ^= fib_value
+                transformed[i] ^= fib_value
         return bytes(transformed)
 
     def reverse_transform_12(self, data, repeat=100):
@@ -874,9 +874,21 @@ class PAQJPCompressor:
             payload = int(bitstream[pos:pos+8], 2); pos += 8
         return payload, pos
 
-    def generate_transform_method(self, n):
-        self.create_quantum_transform_circuit(n, 1048576)
-        def transform(data, repeat=100):
+    def generate_transform_method(self, n: int):
+        if qiskit is not None:
+            circuit = qiskit.QuantumCircuit(9)
+            for i in range(9):
+                circuit.h(i)
+            theta = (n * 1048576) % 512 / 512 * math.pi
+            for i in range(9):
+                circuit.ry(theta, i)
+            for i in range(8):
+                circuit.cx(i, i + 1)
+            logging.info(f"[Transform {n}] Quantum circuit defined (theta={theta:.3f})")
+        else:
+            logging.info(f"[Transform {n}] Quantum-inspired (qiskit not available)")
+
+        def transform(data: bytes, repeat: int = 100) -> bytes:
             if not data:
                 return b''
             transformed = bytearray(data)
@@ -907,7 +919,7 @@ class PAQJPCompressor:
         ]
         slow_transformations = fast_transformations + [
             (10, self.transform_10),
-        ] + [(i, self.generate_transform_method(i)[0]) for i in range(16, 256)]
+        ] + [(i, self.generate_transform_method(i)[0]) for i in range(256)]
 
         transformations = slow_transformations if mode == "slow" else fast_transformations
         if is_dna:
@@ -918,7 +930,7 @@ class PAQJPCompressor:
             if is_dna:
                 prioritized = [(0, self.transform_genomecompress)] + prioritized
             if mode == "slow":
-                prioritized += [(10, self.transform_10)] + [(i, self.generate_transform_method(i)[0]) for i in range(16, 256)]
+                prioritized += [(10, self.transform_10)] + [(i, self.generate_transform_method(i)[0]) for i in range(256)]
             transformations = prioritized + [t for t in transformations if t[0] not in [p[0] for p in prioritized]]
 
         methods = [('paq', self.paq_compress)] if paq else []
@@ -965,7 +977,7 @@ class PAQJPCompressor:
             13: self.reverse_transform_13, 14: self.reverse_transform_14,
             15: Algo15.decompress,
         }
-        reverse_transforms.update({i: self.generate_transform_method(i)[1] for i in range(16, 256)})
+        reverse_transforms.update({i: self.generate_transform_method(i)[1] for i in range(256)})
 
         if method_marker not in reverse_transforms:
             return b'', None
