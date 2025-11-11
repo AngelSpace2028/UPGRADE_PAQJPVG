@@ -33,7 +33,7 @@ logging.basicConfig(
 )
 
 # === Constants ===
-PROGNAME = "PAQJP_6.6"  # Updated version
+PROGNAME = "PAQJP_6.7"  # Updated version
 PI_DIGITS_FILE = "pi_digits.txt"
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p**0.5)+1))]
 MEM = 1 << 15
@@ -866,7 +866,7 @@ def detect_filetype(filename: str) -> Filetype:
 
 
 def main():
-    print("PAQJP_6.6 Compression System (Dictionary-Free)")
+    print("PAQJP_6.7 Compression System (Dictionary-Free)")
     print("Created by Jurijus Pacalovas")
     print("Options:")
     print("1 - Compress file")
