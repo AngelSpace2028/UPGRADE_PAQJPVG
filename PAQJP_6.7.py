@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+PAQJP_6.7_fixed_01_plus
+Dictionary-Free Lossless Compressor
+Authors: Jurijus Pacalovas, Vincent Geoghegan
+New Algorithms: 04 (byte subtract), 11 (Fibonacci XOR), 14 (rotate left), 15 (540-byte pi key)
+All transforms are lossless and deterministic.
+"""
+
 import os
 import sys
 import math
@@ -17,13 +25,13 @@ from typing import List, Dict, Tuple, Optional
 
 # === Try importing optional dependencies ===
 try:
-    import paq  # Python binding for PAQ9a (pip install paq)
+    import paq  # pip install paq
 except ImportError:
     paq = None
     logging.warning("paq module not found. PAQ compression will be disabled.")
 
 try:
-    import qiskit  # For quantum-inspired circuit definition
+    import qiskit
 except ImportError:
     qiskit = None
     logging.warning("qiskit not found. Quantum transforms will be skipped.")
@@ -36,7 +44,7 @@ logging.basicConfig(
 )
 
 # === Constants ===
-PROGNAME = "PAQJP_6.7_fixed_01_plus"          # +04,11,14,15
+PROGNAME = "PAQJP_6.7_fixed_01_plus"
 PI_DIGITS_FILE = "pi_digits.txt"
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p**0.5)+1))]
 MEM = 1 << 15
@@ -390,7 +398,7 @@ class PAQJPCompressor:
         return self.transform_03(data)
 
     # ------------------------------------------------------------------
-    # ALGORITHM 04 – **NEW** – byte-wise subtraction (i % 256)
+    # ALGORITHM 04 – NEW – byte-wise subtraction (i % 256)
     # ------------------------------------------------------------------
     def transform_04(self, data, repeat=100):
         if not data:
@@ -458,7 +466,7 @@ class PAQJPCompressor:
         return bytes(transformed)
 
     # ------------------------------------------------------------------
-    # ALGORITHMS 07-09 (unchanged – kept for completeness)
+    # ALGORITHMS 07-09 (unchanged)
     # ------------------------------------------------------------------
     def transform_07(self, data, repeat=100):
         if not data:
@@ -601,7 +609,7 @@ class PAQJPCompressor:
         return bytes(transformed)
 
     # ------------------------------------------------------------------
-    # ALGORITHM 11 – **NEW** – XOR with Fibonacci sequence (mod 256)
+    # ALGORITHM 11 – NEW – XOR with Fibonacci sequence (mod 256)
     # ------------------------------------------------------------------
     def transform_11(self, data, repeat=100):
         if not data:
@@ -614,7 +622,7 @@ class PAQJPCompressor:
         return bytes(transformed)
 
     def reverse_transform_11(self, data, repeat=100):
-        return self.transform_11(data, repeat)          # XOR is its own inverse
+        return self.transform_11(data, repeat)
 
     # ------------------------------------------------------------------
     # ALGORITHM 12 (unchanged)
@@ -692,7 +700,7 @@ class PAQJPCompressor:
         return bytes(rev)
 
     # ------------------------------------------------------------------
-    # ALGORITHM 14 – **NEW** – rotate each byte left by 1 bit
+    # ALGORITHM 14 – NEW – rotate each byte left by 1 bit
     # ------------------------------------------------------------------
     def transform_14(self, data, repeat=100):
         if not data:
@@ -715,10 +723,9 @@ class PAQJPCompressor:
         return bytes(transformed)
 
     # ------------------------------------------------------------------
-    # ALGORITHM 15 – **NEW** – 540-byte block XOR with pi-derived key
+    # ALGORITHM 15 – NEW – 540-byte block XOR with pi-derived key
     # ------------------------------------------------------------------
     def _pi_key(self, length: int) -> bytes:
-        """Generate a repeating key from the first 540 pi digits (mapped 0-255)."""
         key = bytearray()
         idx = 0
         while len(key) < length:
@@ -741,10 +748,10 @@ class PAQJPCompressor:
         return bytes(transformed)
 
     def reverse_transform_15(self, data, repeat=100):
-        return self.transform_15(data, repeat)          # XOR is its own inverse
+        return self.transform_15(data, repeat)
 
     # ------------------------------------------------------------------
-    # Generic transform generator (unchanged)
+    # Generic transform generator
     # ------------------------------------------------------------------
     def generate_transform_method(self, n):
         self.create_quantum_transform_circuit(n, 1048576)
@@ -773,7 +780,6 @@ class PAQJPCompressor:
         except:
             pass
 
-        # ---- FAST list (includes new 04,11,14,15) ----
         fast_transformations = [
             (1, self.transform_04), (2, self.transform_01), (3, self.transform_03),
             (5, self.transform_05), (6, self.transform_06), (7, self.transform_07),
@@ -782,7 +788,6 @@ class PAQJPCompressor:
             (14, self.transform_14), (15, self.transform_15),
         ]
 
-        # ---- SLOW list (adds 10 + generic 16-255) ----
         slow_transformations = fast_transformations + [
             (10, self.transform_10),
         ] + [(i, self.generate_transform_method(i)[0]) for i in range(16, 256)]
@@ -791,7 +796,6 @@ class PAQJPCompressor:
         if is_dna:
             transformations = [(0, self.transform_genomecompress)] + transformations
 
-        # ---- Prioritisation for JPEG / TEXT ----
         if filetype in [Filetype.JPEG, Filetype.TEXT]:
             prioritized = [(7, self.transform_07), (8, self.transform_08), (9, self.transform_09),
                            (12, self.transform_12), (13, self.transform_13),
@@ -977,31 +981,34 @@ def main():
 # QUICK SELF-TEST
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
-    # 01
+    compressor = PAQJPCompressor()
     t = b"Test01"
+
+    # Test Algo 01
     c = transform_with_prime_xor_every_3_bytes(t, repeat=1)
     d = reverse_transform_with_prime_xor_every_3_bytes(c, repeat=1)
     assert d == t, "Algo01 failed!"
 
-    # 04
-    c4 = PAQJPCompressor().transform_04(t, repeat=1)
-    d4 = PAQJPCompressor().reverse_transform_04(c4, repeat=1)
+    # Test Algo 04
+    c4 = compressor.transform_04(t, repeat=1)
+    d4 = compressor.reverse_transform_04(c4, repeat=1)
     assert d4 == t, "Algo04 failed!"
 
-    # 11
-    c11 = PAQJPCompressor().transform_11(t, repeat=1)
-    d11 = PAQJPCompressor().reverse_transform_11(c11, repeat=1)
+    # Test Algo 11
+    c11 = compressor.transform_11(t, repeat=1)
+    d11 = compressor.reverse_transform_11(c11, repeat=1)
     assert d11 == t, "Algo11 failed!"
 
-    # 14
-    c14 = PAQJPCompressor().transform_14(t, repeat=1)
-    d14 = PAQJPCompressor().reverse_transform_14(c14, repeat=1)
+    # Test Algo 14
+    c14 = compressor.transform_14(t, repeat=1)
+    d14 = compressor.reverse_transform_14(c14, repeat=1)
     assert d14 == t, "Algo14 failed!"
 
-    # 15
-    c15 = PAQJPCompressor().transform_15(t, repeat=1)
-    d15 = PAQJPCompressor().reverse_transform_15(c15, repeat=1)
+    # Test Algo 15
+    c15 = compressor.transform_15(t, repeat=1)
+    d15 = compressor.reverse_transform_15(c15, repeat=1)
     assert d15 == t, "Algo15 failed!"
 
     print("All new algorithms (04,11,14,15) PASS – lossless & deterministic")
+    print("Starting PAQJP Compressor CLI...")
     main()
