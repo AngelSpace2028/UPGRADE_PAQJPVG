@@ -794,7 +794,7 @@ def detect_filetype(filename: str) -> Filetype:
 
 def main():
     print("PAQJP_6.6_fixed_01 Compression System (Dictionary-Free)")
-    print("Created by Jurijus Pacalovas")
+    print("Created by Jurijus Pacalovas and Vincent Geoghegan")
     print("Algorithm 01: FIXED – deterministic & lossless")
     print("Options:")
     print("1 - Compress file")
