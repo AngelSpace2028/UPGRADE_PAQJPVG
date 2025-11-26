@@ -1,6 +1,6 @@
 UPGRADE_PAQJPVG Compression hybrid Software 
 
-Upgrade_Hybid_PAQ_by_Jurijus_Pacalovas_6.7 losslessness 
+UPGRADE_PAQJPVG losslessness 
 Lossless 100% and without corrupted files (choose the best of 256 transformations on the 9 qubits level and extract back) done 26 Nov 2025
 
 Group:
