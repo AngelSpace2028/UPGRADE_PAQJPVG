@@ -779,57 +779,25 @@ class PAQJPCompressor:
         return self.transform_15(data, repeat)
 
     # ------------------------------------------------------------------
-    # ALGORITHMS 16-255 – Generic transforms with quantum circuits
+    # Generic transform generator
     # ------------------------------------------------------------------
     def generate_transform_method(self, n):
-        # Create quantum circuit for this transform
-        circuit = self.create_quantum_transform_circuit(n, 1048576)
-        
+        self.create_quantum_transform_circuit(n, 1048576)
         def transform(data, repeat=100):
             if not data:
                 return b''
             transformed = bytearray(data)
             seed_idx = n % len(self.seed_tables)
             seed_value = self.get_seed(seed_idx, len(data))
-            
-            # Apply quantum-inspired transformation
-            for _ in range(repeat):
-                for i in range(len(transformed)):
-                    # Use quantum circuit index to influence the transformation
-                    quantum_factor = (n * i) % 256
-                    transformed[i] = (transformed[i] ^ seed_value ^ quantum_factor) & 0xFF
-                    
-                    # Additional transformation based on position and transform index
-                    pos_factor = (i * n) % 256
-                    transformed[i] = (transformed[i] + pos_factor) % 256
-                    
+            for i in range(len(transformed)):
+                transformed[i] ^= seed_value
             return bytes(transformed)
-            
-        def reverse_transform(data, repeat=100):
-            if not data:
-                return b''
-            transformed = bytearray(data)
-            seed_idx = n % len(self.seed_tables)
-            seed_value = self.get_seed(seed_idx, len(data))
-            
-            for _ in range(repeat):
-                for i in range(len(transformed)):
-                    # Reverse the position-based transformation first
-                    pos_factor = (i * n) % 256
-                    transformed[i] = (transformed[i] - pos_factor) % 256
-                    
-                    # Reverse the quantum-inspired transformation
-                    quantum_factor = (n * i) % 256
-                    transformed[i] = (transformed[i] ^ seed_value ^ quantum_factor) & 0xFF
-                    
-            return bytes(transformed)
-
-        return transform, reverse_transform
+        return transform, transform
 
     # ------------------------------------------------------------------
     # Compression / decompression core
     # ------------------------------------------------------------------
-    def compress_with_best_method(self, data, filetype, input_filename, mode="slow", use_quantum=False):
+    def compress_with_best_method(self, data, filetype, input_filename, mode="slow"):
         if not data:
             return bytes([0])
 
@@ -843,8 +811,7 @@ class PAQJPCompressor:
         # Apply Algorithm 07 first as requested
         data = self.transform_07(data)
         
-        # Base transformations (0-15)
-        base_transformations = [
+        fast_transformations = [
             (1, self.transform_04), (2, self.transform_01), (3, self.transform_03),
             (5, self.transform_05), (6, self.transform_06), (7, self.transform_07),
             (8, self.transform_08), (9, self.transform_09), (11, self.transform_11),
@@ -852,24 +819,14 @@ class PAQJPCompressor:
             (14, self.transform_14), (15, self.transform_15),
         ]
 
-        # Add DNA transform if applicable
+        slow_transformations = fast_transformations + [
+            (10, self.transform_10),
+        ] + [(i, self.generate_transform_method(i)[0]) for i in range(16, 256)]
+
+        transformations = slow_transformations if mode == "slow" else fast_transformations
         if is_dna:
-            base_transformations = [(0, self.transform_genomecompress)] + base_transformations
+            transformations = [(0, self.transform_genomecompress)] + transformations
 
-        # Add Algorithm 10 for slow mode
-        if mode == "slow":
-            base_transformations = base_transformations + [(10, self.transform_10)]
-
-        # Generate quantum transforms for algorithms 16-255 if requested
-        quantum_transforms = []
-        if use_quantum and mode == "slow":
-            for i in range(16, 256):
-                transform_func, _ = self.generate_transform_method(i)
-                quantum_transforms.append((i, transform_func))
-
-        transformations = base_transformations + quantum_transforms
-
-        # Filetype-specific prioritization
         if filetype in [Filetype.JPEG, Filetype.TEXT]:
             prioritized = [(7, self.transform_07), (8, self.transform_08), (9, self.transform_09),
                            (12, self.transform_12), (13, self.transform_13),
@@ -878,10 +835,7 @@ class PAQJPCompressor:
             if is_dna:
                 prioritized = [(0, self.transform_genomecompress)] + prioritized
             if mode == "slow":
-                prioritized += [(10, self.transform_10)]
-            if use_quantum and mode == "slow":
-                prioritized += quantum_transforms
-                
+                prioritized += [(10, self.transform_10)] + [(i, self.generate_transform_method(i)[0]) for i in range(16, 256)]
             transformations = prioritized + [t for t in transformations if t[0] not in [p[0] for p in prioritized]]
 
         methods = [('paq', self.paq_compress)] if paq else []
@@ -908,14 +862,13 @@ class PAQJPCompressor:
 
         return bytes([best_marker]) + best_compressed
 
-    def decompress_with_best_method(self, data, use_quantum=False):
+    def decompress_with_best_method(self, data):
         if len(data) < 1:
             return b'', None
 
         method_marker = data[0]
         compressed_data = data[1:]
 
-        # Base reverse transforms
         reverse_transforms = {
             0: self.reverse_transform_genomecompress,
             1: self.reverse_transform_04, 2: self.reverse_transform_01,
@@ -926,12 +879,7 @@ class PAQJPCompressor:
             12: self.reverse_transform_12, 13: self.reverse_transform_13,
             14: self.reverse_transform_14, 15: self.reverse_transform_15,
         }
-
-        # Add quantum reverse transforms if needed
-        if use_quantum:
-            for i in range(16, 256):
-                _, reverse_func = self.generate_transform_method(i)
-                reverse_transforms[i] = reverse_func
+        reverse_transforms.update({i: self.generate_transform_method(i)[1] for i in range(16, 256)})
 
         if method_marker not in reverse_transforms:
             return b'', None
@@ -951,14 +899,13 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def compress(self, input_file: str, output_file: str, filetype: Filetype = Filetype.DEFAULT, 
-                 mode: str = "slow", use_quantum: bool = False) -> bool:
+    def compress(self, input_file: str, output_file: str, filetype: Filetype = Filetype.DEFAULT, mode: str = "slow") -> bool:
         try:
             with open(input_file, 'rb') as f:
                 data = f.read()
             if not data:
                 return False
-            compressed = self.compress_with_best_method(data, filetype, input_file, mode, use_quantum)
+            compressed = self.compress_with_best_method(data, filetype, input_file, mode)
             with open(output_file, 'wb') as f:
                 f.write(compressed)
             logging.info(f"Compressed {input_file} → {output_file} ({len(compressed)} bytes)")
@@ -967,13 +914,13 @@ class PAQJPCompressor:
             logging.error(f"Compression failed: {e}")
             return False
 
-    def decompress(self, input_file: str, output_file: str, use_quantum: bool = False) -> bool:
+    def decompress(self, input_file: str, output_file: str) -> bool:
         try:
             with open(input_file, 'rb') as f:
                 data = f.read()
             if not data:
                 return False
-            decompressed, _ = self.decompress_with_best_method(data, use_quantum)
+            decompressed, _ = self.decompress_with_best_method(data)
             if not decompressed:
                 return False
             with open(output_file, 'wb') as f:
@@ -1025,21 +972,13 @@ def main():
     except (EOFError, KeyboardInterrupt):
         return
 
+    mode = "slow"
     if choice == '1':
         try:
             mode_choice = input("Mode (1=fast, 2=slow): ").strip()
             mode = "fast" if mode_choice == '1' else "slow"
         except:
             mode = "slow"
-
-        # Ask about quantum transforms only in slow mode
-        use_quantum = False
-        if mode == "slow" and qiskit is not None:
-            try:
-                quantum_choice = input("Use quantum transforms? (y/n): ").strip().lower()
-                use_quantum = quantum_choice == 'y'
-            except:
-                use_quantum = False
 
         input_file = input("Input file: ").strip()
         output_file = input("Output file: ").strip()
@@ -1049,36 +988,24 @@ def main():
             return
 
         filetype = detect_filetype(input_file)
-        success = compressor.compress(input_file, output_file, filetype, mode, use_quantum)
+        success = compressor.compress(input_file, output_file, filetype, mode)
         if success:
             orig = os.path.getsize(input_file)
             comp = os.path.getsize(output_file)
             ratio = comp / orig * 100 if orig > 0 else 0
             print(f"Compressed: {comp} bytes (Ratio: {ratio:.2f}%)")
-            if use_quantum:
-                print("Quantum transforms were used.")
         else:
             print("Compression failed.")
 
     elif choice == '2':
-        use_quantum = False
-        if qiskit is not None:
-            try:
-                quantum_choice = input("File uses quantum transforms? (y/n): ").strip().lower()
-                use_quantum = quantum_choice == 'y'
-            except:
-                use_quantum = False
-
         input_file = input("Input file: ").strip()
         output_file = input("Output file: ").strip()
         if not os.path.exists(input_file):
             print("Input file not found.")
             return
-        success = compressor.decompress(input_file, output_file, use_quantum)
+        success = compressor.decompress(input_file, output_file)
         if success:
             print(f"Decompressed to {output_file}")
-            if use_quantum:
-                print("Quantum transforms were reversed.")
         else:
             print("Decompression failed.")
 
@@ -1095,12 +1022,6 @@ if __name__ == "__main__":
     d11 = comp.reverse_transform_11(c11)
     assert d11 == test_data, "Algorithm 11 failed!"
 
-    # Test Algorithm 07
-    c07 = comp.transform_07(test_data)
-    d07 = comp.reverse_transform_07(c07)
-    assert d07 == test_data, "Algorithm 07 failed!"
-
     print("Algorithm 11 (54 + 12 + r×#54 + Algo04 prefix) PASSED")
-    print("Algorithm 07 PASSED")
     print("Starting PAQJP Compressor CLI...")
     main()
