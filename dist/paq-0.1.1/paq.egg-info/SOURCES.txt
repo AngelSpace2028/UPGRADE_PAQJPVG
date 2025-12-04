@@ -1,0 +1,11 @@
+MANIFEST.in
+setup.py
+paq/__init__.py
+paq/_paq.cpp
+paq/_paq.pyx
+paq/paq9a.h
+paq.egg-info/PKG-INFO
+paq.egg-info/SOURCES.txt
+paq.egg-info/dependency_links.txt
+paq.egg-info/requires.txt
+paq.egg-info/top_level.txt

@@ -1,0 +1,16 @@
+Metadata-Version: 1.2
+Name: paq
+Version: 0.1.1
+Summary: Python binding for paq9a
+Home-page: http://github.com/observerss/paq
+Author: Jingchao Hu
+Author-email: jingchaohu@gmail.com
+License: UNKNOWN
+Description: UNKNOWN
+Platform: UNKNOWN
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Topic :: System :: Archiving :: Compression
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Requires-Python: >=3.5
