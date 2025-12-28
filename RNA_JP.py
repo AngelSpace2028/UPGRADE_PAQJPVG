@@ -24,6 +24,7 @@ if mode == "c":
     ratio = len(compressed) / len(data) if data else 0
     print(f"Compressed: {file_path} -> {output_path}")
     print(f"Original: {len(data):,} bytes | Compressed: {len(compressed):,} bytes | Ratio: {ratio:.2%}")
+    input("Press Enter to exit...")
 else:
     file_path = input("Enter .zst file to extract: ")
     if not os.path.exists(file_path):
@@ -45,10 +46,5 @@ else:
     ratio = len(data) / len(decompressed) if decompressed else 0
     print(f"Decompressed: {file_path} -> {output_path}")
     print(f"Compressed: {len(data):,} bytes | Original: {len(decompressed):,} bytes | Ratio: {ratio:.2%}")
-    delete = input("\nDelete the compressed file? (y/n): ").lower().strip()
-    if delete in ["y", "yes"]:
-        try:
-            os.remove(file_path)
-            print(f"Deleted: {file_path}")
-        except OSError as e:
-            print(f"Could not delete {file_path}: {e}")
+    # Automatically choose NO for delete after extract
+    print("\nKeeping the compressed file (automatic choice: no)")
