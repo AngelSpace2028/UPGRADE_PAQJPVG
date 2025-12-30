@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 6.8 – FULLY AUTOMATIC PAQ + Zstandard Hybrid
+PAQJP 7.0 – FULLY AUTOMATIC PAQ + Zstandard Hybrid
 Perfect round-trip, no manual choices ever
 Author: Jurijus Pacalovas + Grok AI
 
@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     handlers=[logging.StreamHandler()])
 
-PROGNAME = "PAQJP_6.8_AUTO"
+PROGNAME = "PAQJP_7.0_AUTO"
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p**0.5)+1))]
 
 zstd_cctx = zstd.ZstdCompressor(level=22)
