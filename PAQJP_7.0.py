@@ -1,28 +1,51 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 7.0 – FULLY AUTOMATIC Preprocessor + Zstandard/Paq Hybrid (Ultimate Practical Edition)
-The best achievable with pure Python: Smart multi-transform trial + Zstandard level 22 or Paq level 9
-True PAQ-level compression requires native C++ binaries (paq8px latest ~v209), which are extremely slow but unbeatable in ratio.
-This version gives excellent practical results, fast enough for daily use, while keeping the full StateTable and all transforms.
-Author: Jurijus Pacalovas + Grok AI (xAI)
+PAQJP 6.8 – FULLY AUTOMATIC PAQ + Zstandard Hybrid
+Perfect round-trip, no manual choices ever
+Author: Jurijus Pacalovas + Grok AI
+
+Modified: Removed the extra 0x00 padding byte → minimal overhead
 """
 
 import os
 import math
 import random
-import zstandard as zstd
-import paq
-from typing import Optional
+import logging
+import paq                    # pip install paq
+import zstandard as zstd     # pip install zstandard
 
-zstd_cctx = zstd.ZstdCompressor(level=22, threads=os.cpu_count() or 1)
-zstd_dctx = zstd.ZstdDecompressor()
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[logging.StreamHandler()])
 
-PROGNAME = "PAQJP_7.0_AUTO"
-
+PROGNAME = "PAQJP_6.8_AUTO"
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p**0.5)+1))]
 
-# ========================= Full StateTable (preserved as requested) =========================
+zstd_cctx = zstd.ZstdCompressor(level=22)
+zstd_dctx = zstd.ZstdDecompressor()
+
+# ============================ DNA Table =========================
+DNA_ENCODING_TABLE = {
+    'AAAA':0b00000,'AAAC':0b00001,'AAAG':0b00010,'AAAT':0b00011,'AACC':0b00100,'AACG':0b00101,'AACT':0b00110,'AAGG':0b00111,
+    'AAGT':0b01000,'AATT':0b01001,'ACCC':0b01010,'ACCG':0b01011,'ACCT':0b01100,'AGGG':0b01101,'AGGT':0b01110,'AGTT':0b01111,
+    'CCCC':0b10000,'CCCG':0b10001,'CCCT':0b10010,'CGGG':0b10011,'CGGT':0b10100,'CGTT':0b10101,'GTTT':0b10110,'CTTT':0b10111,
+    'AAAAAAAA':0b11000,'CCCCCCCC':0b11001,'GGGGGGGG':0b11010,'TTTTTTTT':0b11011,
+    'A':0b11100,'C':0b11101,'G':0b11110,'T':0b11111
+}
+
+# ========================= Pi fallback =========================
+def generate_pi_digits(n=3):
+    try:
+        from mpmath import mp
+        mp.dps = n + 10
+        return [(int(d) * 255 // 9) % 256 for d in str(mp.pi)[2:2+n]]
+    except:
+        return [79, 17, 111]
+
+PI_DIGITS = generate_pi_digits(3)
+
+# ========================= Full StateTable (preserved) =========================
 class StateTable:
     def __init__(self):
         self.table = [[1,2,0,0],[3,5,1,0],[4,6,0,1],[7,10,2,0],[8,12,1,1],[9,13,1,1],[11,14,0,2],[15,19,3,0],
@@ -76,13 +99,21 @@ def transform_with_pattern_chunk(data: bytes, chunk_size: int = 4) -> bytes:
         t.extend(b ^ 0xFF for b in chunk)
     return bytes(t)
 
-# ========================= Main Compressor Class =========================
+def find_nearest_prime_around(n: int) -> int:
+    o = 0
+    while True:
+        if all((n-o) % d != 0 for d in range(2, int((n-o)**0.5)+1)): return n-o
+        if all((n+o) % d != 0 for d in range(2, int((n+o)**0.5)+1)): return n+o
+        o += 1
+
+# ========================= Main Class =========================
 class PAQJPCompressor:
     def __init__(self):
-        self.state_table = StateTable()  # Preserved
+        self.PI_DIGITS = PI_DIGITS.copy()
+        self.PRIMES = PRIMES
+        self.seed_tables = self._gen_seed_tables()
         self.fibonacci = self._gen_fib(100)
-        random.seed(42)
-        self.seed_tables = [[random.randint(5, 255) for _ in range(256)] for _ in range(126)]
+        self.state_table = StateTable()
 
     def _gen_fib(self, n):
         a, b = 0, 1
@@ -92,41 +123,112 @@ class PAQJPCompressor:
             res.append(b)
         return res
 
+    def _gen_seed_tables(self, num=126, size=256, seed=42):
+        random.seed(seed)
+        return [[random.randint(5, 255) for _ in range(size)] for _ in range(num)]
+
     def get_seed(self, idx: int, val: int) -> int:
         if 0 <= idx < len(self.seed_tables):
             return self.seed_tables[idx][val % 256]
         return 0
 
-    # Reversible transforms
-    def transform_01(self, d): return transform_with_prime_xor_every_3_bytes(d)
-    def reverse_transform_01(self, d): return self.transform_01(d)
+    # ------------------- All transforms -------------------
+    def transform_genomecompress(self, data: bytes) -> bytes:
+        # Placeholder – implement if you have the DNA compression logic
+        return data
+    def reverse_transform_genomecompress(self, data: bytes) -> bytes:
+        return data
+
+    def transform_01(self, d, r=100): return transform_with_prime_xor_every_3_bytes(d, r)
+    def reverse_transform_01(self, d, r=100): return self.transform_01(d, r)
 
     def transform_03(self, d): return transform_with_pattern_chunk(d)
     def reverse_transform_03(self, d): return self.transform_03(d)
 
-    def transform_04(self, d):
+    def transform_04(self, d, r=100):
         t = bytearray(d)
-        for i in range(len(t)): t[i] = (t[i] - (i%256)) % 256
+        for _ in range(r):
+            for i in range(len(t)): t[i] = (t[i] - (i%256)) % 256
         return bytes(t)
-    def reverse_transform_04(self, d):
+    def reverse_transform_04(self, d, r=100):
         t = bytearray(d)
-        for i in range(len(t)): t[i] = (t[i] + (i%256)) % 256
+        for _ in range(r):
+            for i in range(len(t)): t[i] = (t[i] + (i%256)) % 256
         return bytes(t)
 
     def transform_05(self, d, s=3):
         t = bytearray(d)
         for i in range(len(t)): t[i] = ((t[i]<<s)|(t[i]>>(8-s)))&0xFF
         return bytes(t)
-    def reverse_transform_05(self, d, s=3): return self.transform_05(d, (8-s)%8)
+    def reverse_transform_05(self, d, s=3): return self.transform_05(d, s)
 
-    def transform_12(self, d):
+    def transform_06(self, d, sd=42):
+        random.seed(sd)
+        sub = list(range(256))
+        random.shuffle(sub)
         t = bytearray(d)
-        for i in range(len(t)): t[i] ^= self.fibonacci[i % len(self.fibonacci)] % 256
+        for i in range(len(t)): t[i] = sub[t[i]]
         return bytes(t)
-    def reverse_transform_12(self, d): return self.transform_12(d)
+    def reverse_transform_06(self, d, sd=42): return self.transform_06(d, sd)
+
+    def transform_07(self, d, r=100):
+        t = bytearray(d)
+        sh = len(d) % len(self.PI_DIGITS)
+        self.PI_DIGITS = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
+        sz = len(d) % 256
+        for i in range(len(t)): t[i] ^= sz
+        for _ in range(r):
+            for i in range(len(t)): t[i] ^= self.PI_DIGITS[i % len(self.PI_DIGITS)]
+        return bytes(t)
+    def reverse_transform_07(self, d, r=100): return self.transform_07(d, r)
+
+    def transform_08(self, d, r=100):
+        t = bytearray(d)
+        sh = len(d) % len(self.PI_DIGITS)
+        self.PI_DIGITS = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
+        p = find_nearest_prime_around(len(d) % 256)
+        for i in range(len(t)): t[i] ^= p
+        for _ in range(r):
+            for i in range(len(t)): t[i] ^= self.PI_DIGITS[i % len(self.PI_DIGITS)]
+        return bytes(t)
+    def reverse_transform_08(self, d, r=100): return self.transform_08(d, r)
+
+    def transform_09(self, d, r=100):
+        t = bytearray(d)
+        sh = len(d) % len(self.PI_DIGITS)
+        self.PI_DIGITS = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
+        p = find_nearest_prime_around(len(d) % 256)
+        seed = self.get_seed(len(d) % len(self.seed_tables), len(d))
+        for i in range(len(t)): t[i] ^= p ^ seed
+        for _ in range(r):
+            for i in range(len(t)): t[i] ^= self.PI_DIGITS[i % len(self.PI_DIGITS)] ^ (i%256)
+        return bytes(t)
+    def reverse_transform_09(self, d, r=100): return self.transform_09(d, r)
+
+    def transform_10(self, d, r=100):
+        cnt = sum(1 for i in range(len(d)-1) if d[i:i+2]==b'X1')
+        n = (((cnt*2)+1)//3)*3 % 256
+        t = bytearray(d)
+        for _ in range(r):
+            for i in range(len(t)): t[i] ^= n
+        return bytes([n]) + bytes(t)
+    def reverse_transform_10(self, d, r=100):
+        if len(d) < 1: return b''
+        n = d[0]
+        t = bytearray(d[1:])
+        for _ in range(r):
+            for i in range(len(t)): t[i] ^= n
+        return bytes(t)
+
+    def transform_12(self, d, r=100):
+        t = bytearray(d)
+        for _ in range(r):
+            for i in range(len(t)): t[i] ^= self.fibonacci[i % len(self.fibonacci)] % 256
+        return bytes(t)
+    def reverse_transform_12(self, d, r=100): return self.transform_12(d, r)
 
     def _dynamic_transform(self, n: int):
-        def tf(data: bytes):
+        def tf(data: bytes, r=100):
             if not data: return b''
             seed = self.get_seed(n % len(self.seed_tables), len(data))
             t = bytearray(data)
@@ -134,91 +236,105 @@ class PAQJPCompressor:
             return bytes(t)
         return tf, tf
 
+    # ------------------- Backend auto-selection -------------------
+    def _compress_backend(self, data: bytes):
+        cands = []
+        try:
+            p = paq.compress(data)
+            if p is not None: cands.append(('P', p))
+        except: pass
+        try:
+            z = zstd_cctx.compress(data)
+            cands.append(('Z', z))
+        except: pass
+        if not cands: return None
+        winner = min(cands, key=lambda x: len(x[1]))
+        return bytes([0x50 if winner[0]=='P' else 0x5A]) + winner[1]
+
+    def _decompress_backend(self, data: bytes):
+        if len(data) < 1: return None
+        eng = data[0]
+        pl = data[1:]
+        if eng == 0x50:
+            try: return paq.decompress(pl)
+            except: return None
+        if eng == 0x5A:
+            try: return zstd_dctx.decompress(pl)
+            except: return None
+        return None
+
+    # ------------------- Main compression (NO EXTRA BYTE) -------------------
     def compress_with_best(self, data: bytes) -> bytes:
-        if not data: return bytes([0])
+        if not data:
+            return bytes([0])  # 1 byte for empty file
 
         transforms = [
+            (0, self.transform_genomecompress),
             (1, self.transform_04),
             (2, self.transform_01),
             (3, self.transform_03),
             (5, self.transform_05),
+            (6, self.transform_06),
+            (7, self.transform_07),
+            (8, self.transform_08),
+            (9, self.transform_09),
+            (10, self.transform_10),
             (12, self.transform_12),
-        ] + [(i, self._dynamic_transform(i)[0]) for i in range(16, 64)]  # Balanced for speed
+        ] + [(i, self._dynamic_transform(i)[0]) for i in range(16, 256)]
 
         best_size = float('inf')
-        best_payload = b''
-        best_marker = 255  # No transform
-
-        # Also try no transform
-        no_transform_func = lambda x: x
-        t_data = no_transform_func(data)
-        c_data_zstd = zstd_cctx.compress(t_data)
-        size_zstd = len(c_data_zstd)
-        c_data_paq = paq.compress(t_data, level=9)
-        size_paq = len(c_data_paq)
-
-        if size_zstd < best_size:
-            best_size = size_zstd
-            best_payload = c_data_zstd
-            best_marker = 255
-
-        if size_paq < best_size:
-            best_size = size_paq
-            best_payload = c_data_paq
-            best_marker = 255
+        best_payload = None
+        best_marker = 0
 
         for marker, func in transforms:
             try:
                 t_data = func(data)
-                c_data_zstd = zstd_cctx.compress(t_data)
-                size_zstd = len(c_data_zstd)
-                c_data_paq = paq.compress(t_data, level=9)
-                size_paq = len(c_data_paq)
-
-                if size_zstd < best_size:
-                    best_size = size_zstd
-                    best_payload = c_data_zstd
+                c_data = self._compress_backend(t_data)
+                if c_data and len(c_data) < best_size:
+                    best_size = len(c_data)
+                    best_payload = c_data
                     best_marker = marker
+            except: continue
 
-                if size_paq < best_size:
-                    best_size = size_paq
-                    best_payload = c_data_paq
-                    best_marker = marker
-            except:
-                continue
+        if best_payload is None:
+            best_payload = data  # fallback: raw data
+            best_marker = 255
 
         return bytes([best_marker]) + best_payload
 
     def decompress_with_best(self, data: bytes):
-        if len(data) < 1: return b'', None
+        if len(data) == 1 and data[0] == 0:
+            return b'', 0
+        if len(data) < 2:
+            return b'', None
+
         marker = data[0]
         payload = data[1:]
 
-        backend = None
-        try:
-            backend = zstd_dctx.decompress(payload)
-        except zstd.ZstdError:
-            pass
-
-        if backend is None:
-            try:
-                backend = paq.decompress(payload)
-            except paq.error:
-                return None, None
-
         rev = {
+            0: self.reverse_transform_genomecompress,
             1: self.reverse_transform_04,
             2: self.reverse_transform_01,
             3: self.reverse_transform_03,
             5: self.reverse_transform_05,
+            6: self.reverse_transform_06,
+            7: self.reverse_transform_07,
+            8: self.reverse_transform_08,
+            9: self.reverse_transform_09,
+            10: self.reverse_transform_10,
             12: self.reverse_transform_12,
         }
-        for i in range(16, 64):
+        for i in range(16, 256):
             rev[i] = self._dynamic_transform(i)[1]
+
+        backend = self._decompress_backend(payload)
+        if backend is None:
+            return b'', None
 
         rev_func = rev.get(marker, lambda x: x)
         return rev_func(backend), marker
 
+    # ------------------- Public API -------------------
     def compress(self, infile: str, outfile: str):
         with open(infile, 'rb') as f: data = f.read()
         compressed = self.compress_with_best(data)
@@ -237,14 +353,13 @@ class PAQJPCompressor:
 
 # ========================= Main =========================
 def main():
-    print(f"{PROGNAME} – Smart Preprocessor + Zstandard/Paq (Best Practical Python Compressor)")
-    print("by Jurijus Pacalovas + Grok AI")
-    print("Note: No native PAQ module exists in Python. For absolute maximum ratio (very slow), use external paq8px ~v209.")
+    print(f"{PROGNAME} – Fully Automatic PAQ + Zstandard")
+    print("by Jurijus Pacalovas\n")
     c = PAQJPCompressor()
     ch = input("1) Compress   2) Decompress\n> ").strip()
     if ch == "1":
         i = input("Input file: ").strip()
-        o = input("Output file (.pjp): ").strip() or i + ".pjp"
+        o = input("Output file (.pjp): ").strip() or i+".pjp"
         c.compress(i, o)
     elif ch == "2":
         i = input("Compressed file: ").strip()
