@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 PAQJP 7.0 – FULLY AUTOMATIC Preprocessor + Zstandard/Paq Hybrid (Ultimate Practical Edition)
-The best achievable with pure Python: Smart multi-transform trial + Zstandard level 22 or Paq level 9
+The best achievable with pure Python: Smart multi-transform trial + Zstandard level 22 + Paq level 9
 True PAQ-level compression requires native C++ binaries (paq8px latest ~v209), which are extremely slow but unbeatable in ratio.
 This version gives excellent practical results, fast enough for daily use, while keeping the full StateTable and all transforms.
 Author: Jurijus Pacalovas + Grok AI (xAI)
@@ -15,6 +15,7 @@ import zstandard as zstd
 import paq
 from typing import Optional
 
+# Global compressors/decompressors
 zstd_cctx = zstd.ZstdCompressor(level=22, threads=os.cpu_count() or 1)
 zstd_dctx = zstd.ZstdDecompressor()
 
@@ -135,7 +136,8 @@ class PAQJPCompressor:
         return tf, tf
 
     def compress_with_best(self, data: bytes) -> bytes:
-        if not data: return bytes([0])
+        if not data:
+            return bytes([0])
 
         transforms = [
             (1, self.transform_04),
@@ -143,70 +145,69 @@ class PAQJPCompressor:
             (3, self.transform_03),
             (5, self.transform_05),
             (12, self.transform_12),
-        ] + [(i, self._dynamic_transform(i)[0]) for i in range(16, 64)]  # Balanced for speed
+        ] + [(i, self._dynamic_transform(i)[0]) for i in range(16, 64)]
 
         best_size = float('inf')
         best_payload = b''
         best_marker = 255  # No transform
 
-        # Also try no transform
-        no_transform_func = lambda x: x
-        t_data = no_transform_func(data)
-        c_data_zstd = zstd_cctx.compress(t_data)
-        size_zstd = len(c_data_zstd)
-        c_data_paq = paq.compress(t_data)
-        size_paq = len(c_data_paq)
+        # Try no transform first
+        t_data = data
+        c_zstd = zstd_cctx.compress(t_data)
+        c_paq = paq.compress(t_data, level=9)  # MAXIMUM paq level
 
-        if size_zstd < best_size:
-            best_size = size_zstd
-            best_payload = c_data_zstd
+        if len(c_zstd) < best_size:
+            best_size = len(c_zstd)
+            best_payload = c_zstd
             best_marker = 255
 
-        if size_paq < best_size:
-            best_size = size_paq
-            best_payload = c_data_paq
+        if len(c_paq) < best_size:
+            best_size = len(c_paq)
+            best_payload = c_paq
             best_marker = 255
 
+        # Try all transforms
         for marker, func in transforms:
             try:
                 t_data = func(data)
-                c_data_zstd = zstd_cctx.compress(t_data)
-                size_zstd = len(c_data_zstd)
-                c_data_paq = paq.compress(t_data)
-                size_paq = len(c_data_paq)
+                c_zstd = zstd_cctx.compress(t_data)
+                c_paq = paq.compress(t_data, level=9)  # MAXIMUM paq level
 
-                if size_zstd < best_size:
-                    best_size = size_zstd
-                    best_payload = c_data_zstd
+                if len(c_zstd) < best_size:
+                    best_size = len(c_zstd)
+                    best_payload = c_zstd
                     best_marker = marker
 
-                if size_paq < best_size:
-                    best_size = size_paq
-                    best_payload = c_data_paq
+                if len(c_paq) < best_size:
+                    best_size = len(c_paq)
+                    best_payload = c_paq
                     best_marker = marker
-            except:
+            except Exception:
                 continue
 
         return bytes([best_marker]) + best_payload
 
     def decompress_with_best(self, data: bytes):
-        if len(data) < 1: return b'', None
+        if len(data) < 1:
+            return None, None
         marker = data[0]
         payload = data[1:]
 
-        backend = None
+        # Try Zstandard first
         try:
-            backend = zstd_dctx.decompress(payload)
+            decompressed = zstd_dctx.decompress(payload)
         except zstd.ZstdError:
-            pass
+            decompressed = None
 
-        if backend is None:
+        # Fall back to paq
+        if decompressed is None:
             try:
-                backend = paq.decompress(payload)
+                decompressed = paq.decompress(payload)
             except paq.error:
                 return None, None
 
-        rev = {
+        # Reverse transform based on marker
+        rev_map = {
             1: self.reverse_transform_04,
             2: self.reverse_transform_01,
             3: self.reverse_transform_03,
@@ -214,42 +215,53 @@ class PAQJPCompressor:
             12: self.reverse_transform_12,
         }
         for i in range(16, 64):
-            rev[i] = self._dynamic_transform(i)[1]
+            rev_map[i] = self._dynamic_transform(i)[1]
 
-        rev_func = rev.get(marker, lambda x: x)
-        return rev_func(backend), marker
+        rev_func = rev_map.get(marker, lambda x: x)
+        return rev_func(decompressed), marker
 
     def compress(self, infile: str, outfile: str):
-        with open(infile, 'rb') as f: data = f.read()
+        with open(infile, 'rb') as f:
+            data = f.read()
         compressed = self.compress_with_best(data)
-        with open(outfile, 'wb') as f: f.write(compressed)
+        with open(outfile, 'wb') as f:
+            f.write(compressed)
         ratio = (1 - len(compressed)/len(data))*100 if data else 0
         print(f"Compressed {len(data)} → {len(compressed)} bytes ({ratio:.2f}% saved) → {outfile}")
 
     def decompress(self, infile: str, outfile: str):
-        with open(infile, 'rb') as f: data = f.read()
+        with open(infile, 'rb') as f:
+            data = f.read()
         original, _ = self.decompress_with_best(data)
         if original is None:
             print("Decompression failed!")
             return
-        with open(outfile, 'wb') as f: f.write(original)
+        with open(outfile, 'wb') as f:
+            f.write(original)
         print(f"Decompressed → {outfile}")
 
 # ========================= Main =========================
 def main():
-    print(f"{PROGNAME} – Smart Preprocessor + Zstandard/Paq (Best Practical Python Compressor)")
-    print("by Jurijus Pacalovas + Grok AI")
-    print("Note: No native PAQ module exists in Python. For absolute maximum ratio (very slow), use external paq8px ~v209.")
+    print(f"{PROGNAME} – Smart Preprocessor + Zstandard level 22 + Paq level 9")
+    print("by Jurijus Pacalovas + Grok AI (xAI)")
+    print("Note: For absolute maximum ratio (very slow), use external paq8px ~v209.")
+    print()
     c = PAQJPCompressor()
-    ch = input("1) Compress   2) Decompress\n> ").strip()
-    if ch == "1":
-        i = input("Input file: ").strip()
-        o = input("Output file (.pjp): ").strip() or i + ".pjp"
-        c.compress(i, o)
-    elif ch == "2":
-        i = input("Compressed file: ").strip()
-        o = input("Output file: ").strip()
-        c.decompress(i, o)
+    choice = input("1) Compress   2) Decompress\n> ").strip()
+    if choice == "1":
+        infile = input("Input file: ").strip()
+        outfile = input("Output file (.pjp): ").strip()
+        if not outfile:
+            outfile = infile + ".pjp"
+        c.compress(infile, outfile)
+    elif choice == "2":
+        infile = input("Compressed file: ").strip()
+        outfile = input("Output file: ").strip()
+        if not outfile:
+            outfile = os.path.splitext(infile)[0] + ".dec"
+        c.decompress(infile, outfile)
+    else:
+        print("Invalid choice.")
 
 if __name__ == "__main__":
     main()
