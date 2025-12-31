@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 7.0 – FULLY AUTOMATIC Preprocessor + Zstandard/Paq Hybrid (Ultimate Practical Edition)
-The best achievable with pure Python: Smart multi-transform trial + Zstandard level 22 + Paq level 9
-True PAQ-level compression requires native C++ binaries (paq8px latest ~v209), which are extremely slow but unbeatable in ratio.
-This version gives excellent practical results, fast enough for daily use, while keeping the full StateTable and all transforms.
+PAQJP 7.0 – FULLY AUTOMATIC Preprocessor + Zstandard/Paq Hybrid
+Smart multi-transform trial + Zstandard level 22 + Paq default level (6)
 Author: Jurijus Pacalovas + Grok AI (xAI)
 """
 
@@ -13,7 +11,6 @@ import math
 import random
 import zstandard as zstd
 import paq
-from typing import Optional
 
 # Global compressors/decompressors
 zstd_cctx = zstd.ZstdCompressor(level=22, threads=os.cpu_count() or 1)
@@ -23,7 +20,7 @@ PROGNAME = "PAQJP_7.0_AUTO"
 
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p**0.5)+1))]
 
-# ========================= Full StateTable (preserved as requested) =========================
+# ========================= Full StateTable (preserved) =========================
 class StateTable:
     def __init__(self):
         self.table = [[1,2,0,0],[3,5,1,0],[4,6,0,1],[7,10,2,0],[8,12,1,1],[9,13,1,1],[11,14,0,2],[15,19,3,0],
@@ -80,7 +77,7 @@ def transform_with_pattern_chunk(data: bytes, chunk_size: int = 4) -> bytes:
 # ========================= Main Compressor Class =========================
 class PAQJPCompressor:
     def __init__(self):
-        self.state_table = StateTable()  # Preserved
+        self.state_table = StateTable()
         self.fibonacci = self._gen_fib(100)
         random.seed(42)
         self.seed_tables = [[random.randint(5, 255) for _ in range(256)] for _ in range(126)]
@@ -151,33 +148,31 @@ class PAQJPCompressor:
         best_payload = b''
         best_marker = 255  # No transform
 
-        # Try no transform first
+        # No transform
         t_data = data
         c_zstd = zstd_cctx.compress(t_data)
-        c_paq = paq.compress(t_data, level=9)  # MAXIMUM paq level
+        c_paq = paq.compress(t_data)  # Uses default level 6
 
         if len(c_zstd) < best_size:
             best_size = len(c_zstd)
             best_payload = c_zstd
             best_marker = 255
-
         if len(c_paq) < best_size:
             best_size = len(c_paq)
             best_payload = c_paq
             best_marker = 255
 
-        # Try all transforms
+        # All transforms
         for marker, func in transforms:
             try:
                 t_data = func(data)
                 c_zstd = zstd_cctx.compress(t_data)
-                c_paq = paq.compress(t_data, level=9)  # MAXIMUM paq level
+                c_paq = paq.compress(t_data)  # Default level (no level specified)
 
                 if len(c_zstd) < best_size:
                     best_size = len(c_zstd)
                     best_payload = c_zstd
                     best_marker = marker
-
                 if len(c_paq) < best_size:
                     best_size = len(c_paq)
                     best_payload = c_paq
@@ -193,20 +188,17 @@ class PAQJPCompressor:
         marker = data[0]
         payload = data[1:]
 
-        # Try Zstandard first
         try:
             decompressed = zstd_dctx.decompress(payload)
         except zstd.ZstdError:
             decompressed = None
 
-        # Fall back to paq
         if decompressed is None:
             try:
                 decompressed = paq.decompress(payload)
             except paq.error:
                 return None, None
 
-        # Reverse transform based on marker
         rev_map = {
             1: self.reverse_transform_04,
             2: self.reverse_transform_01,
@@ -242,23 +234,18 @@ class PAQJPCompressor:
 
 # ========================= Main =========================
 def main():
-    print(f"{PROGNAME} – Smart Preprocessor + Zstandard level 22 + Paq level 9")
+    print(f"{PROGNAME} – Zstandard level 22 + Paq default level")
     print("by Jurijus Pacalovas + Grok AI (xAI)")
-    print("Note: For absolute maximum ratio (very slow), use external paq8px ~v209.")
     print()
     c = PAQJPCompressor()
     choice = input("1) Compress   2) Decompress\n> ").strip()
     if choice == "1":
         infile = input("Input file: ").strip()
-        outfile = input("Output file (.pjp): ").strip()
-        if not outfile:
-            outfile = infile + ".pjp"
+        outfile = input("Output file (.pjp): ").strip() or infile + ".pjp"
         c.compress(infile, outfile)
     elif choice == "2":
         infile = input("Compressed file: ").strip()
-        outfile = input("Output file: ").strip()
-        if not outfile:
-            outfile = os.path.splitext(infile)[0] + ".dec"
+        outfile = input("Output file: ").strip() or os.path.splitext(infile)[0] + ".dec"
         c.decompress(infile, outfile)
     else:
         print("Invalid choice.")
