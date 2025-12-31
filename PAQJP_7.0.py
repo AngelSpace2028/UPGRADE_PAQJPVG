@@ -172,7 +172,7 @@ class PAQJPCompressor:
                 t_data = func(data)
                 c_data_zstd = zstd_cctx.compress(t_data)
                 size_zstd = len(c_data_zstd)
-                c_data_paq = paq.compress(t_data, level=9)
+                c_data_paq = paq.compress(t_data)
                 size_paq = len(c_data_paq)
 
                 if size_zstd < best_size:
