@@ -13,7 +13,7 @@ import zstandard as zstd
 import paq
 
 # Global compressors/decompressors
-zstd_cctx = zstd.ZstdCompressor(level=22)
+zstd_cctx = zstd.ZstdCompressor(level=22, threads=os.cpu_count() or 1)
 zstd_dctx = zstd.ZstdDecompressor()
 
 PROGNAME = "PAQJP_7.0_AUTO"
