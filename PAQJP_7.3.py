@@ -37,6 +37,7 @@ PI_MASK = [(d * 31) % 256 for d in PI_DIGITS * 2]
 
 # ------------------------------------------------------------
 # StateTable class (separate)
+# Arithmetic table
 # ------------------------------------------------------------
 class StateTable:
     def __init__(self):
