@@ -5,4 +5,3 @@ Lossless 100% and without corrupted files (choose the best of 256 transformation
 
 Group:
 Jurijus Pacalovas and Vincent Geoghegan helped add 1 byte in the front markers.
-
