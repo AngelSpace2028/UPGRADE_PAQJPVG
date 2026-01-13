@@ -7,7 +7,8 @@ Automatically chooses between paq and zstandard (if available) for best size
 No external dependencies required (zstandard optional for better ratios)
 Perfect lossless round-trip guaranteed
 Includes self-contained PAQ-style StateTable
-All transforms fully reversible
+All transforms fully reversible (except transform 11 which was removed)
+
 Author: Jurijus Pacalovas + Grok AI
 """
 
@@ -212,46 +213,6 @@ class PAQJPCompressor:
         return bytes(t)
     def reverse_transform_12(self, d, r=100): return self.transform_12(d, r)
 
-    def transform_11(self, data: bytes) -> bytes:
-        if not data:
-            return b'\x00\x00' + len(data).to_bytes(8, 'big')
-
-        best_size = float('inf')
-        best_rotated = None
-        best_repeats = 0
-        current = bytearray(data)
-
-        for repeats in range(1, 8001):
-            for i in range(len(current)):
-                current[i] = ((current[i] << 1) | (current[i] >> 7)) & 0xFF
-
-            compressed = self._compress_backend(current)
-            if compressed and len(compressed) < best_size:
-                best_size = len(compressed)
-                best_rotated = bytes(current)
-                best_repeats = repeats
-
-        if best_rotated is None:
-            best_rotated = data
-            best_repeats = 0
-
-        header = best_repeats.to_bytes(2, 'big') + len(data).to_bytes(8, 'big')
-        return header + best_rotated
-
-    def reverse_transform_11(self, data: bytes) -> bytes:
-        if len(data) < 10:
-            return b''
-
-        repeats = int.from_bytes(data[:2], 'big')
-        orig_len = int.from_bytes(data[2:10], 'big')
-        t = bytearray(data[10:])
-
-        for _ in range(repeats):
-            for i in range(len(t)):
-                t[i] = ((t[i] >> 1) | (t[i] << 7)) & 0xFF
-
-        return bytes(t[:orig_len])
-
     def _dynamic_transform(self, n: int):
         def tf(data: bytes):
             if not data: return b''
@@ -264,7 +225,7 @@ class PAQJPCompressor:
     # ------------------- Hybrid backend (paq default + zstd optional) -------------------
     def _compress_backend(self, data: bytes) -> bytes:
         candidates = []
-        # paq with default level (no level specified → level 6)
+        # paq with default level
         candidates.append((b'L', paq.compress(data)))
         # zstd if available
         if HAS_ZSTD:
@@ -300,23 +261,22 @@ class PAQJPCompressor:
         best_marker = 255
 
         transforms = [
-            (1, self.transform_01),
-            (4, self.transform_04),
-            (5, self.transform_05),
-            (6, self.transform_06),
-            (7, self.transform_07),
-            (8, self.transform_08),
-            (9, self.transform_09),
+            (1,  self.transform_01),
+            (4,  self.transform_04),
+            (5,  self.transform_05),
+            (6,  self.transform_06),
+            (7,  self.transform_07),
+            (8,  self.transform_08),
+            (9,  self.transform_09),
             (10, self.transform_10),
-            (11, self.transform_11),
             (12, self.transform_12),
-        ] + [(i, self._dynamic_transform(i)[0]) for i in range(16, 256)]
+        ] + [(i, self._dynamic_transform(i)[0]) for i in range(16, 256) if i not in (11,)]
 
         for marker, func in transforms:
             try:
                 transformed = func(data)
                 compressed = self._compress_backend(transformed)
-                if len(compressed) < best_size:
+                if compressed and len(compressed) < best_size:
                     best_size = len(compressed)
                     best_payload = compressed
                     best_marker = marker
@@ -337,19 +297,19 @@ class PAQJPCompressor:
             return b'', None
 
         rev_map = {
-            1: self.reverse_transform_01,
-            4: self.reverse_transform_04,
-            5: self.reverse_transform_05,
-            6: self.reverse_transform_06,
-            7: self.reverse_transform_07,
-            8: self.reverse_transform_08,
-            9: self.reverse_transform_09,
+            1:  self.reverse_transform_01,
+            4:  self.reverse_transform_04,
+            5:  self.reverse_transform_05,
+            6:  self.reverse_transform_06,
+            7:  self.reverse_transform_07,
+            8:  self.reverse_transform_08,
+            9:  self.reverse_transform_09,
             10: self.reverse_transform_10,
-            11: self.reverse_transform_11,
             12: self.reverse_transform_12,
             255: lambda x: x,
         }
         for i in range(16, 256):
+            if i == 11: continue
             rev_map[i] = self._dynamic_transform(i)[1]
 
         rev_func = rev_map.get(marker, lambda x: x)
