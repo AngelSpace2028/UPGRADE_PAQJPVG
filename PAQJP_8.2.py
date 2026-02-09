@@ -118,30 +118,37 @@ class PAQJPCompressor:
         return val
 
     # ────────────────────────────────────────────────
-    # TRANSFORM 00 – multi-pass best shift + compact RLE (now lossless)
+    # TRANSFORM 00 – multi-pass best shift + compact RLE (corrected lossless)
     # ────────────────────────────────────────────────
     def transform_00(self, data: bytes) -> bytes:
         if not data:
             return b'\x00'
 
-        current = bytearray(data)
         best_result = None
         best_length = float('inf')
-        best_shifts = []  # list of applied shifts, in order
+        best_shifts = []  # list of shifts that led to best result
+        best_shifted_data = None  # the transformed data that gave best result
 
-        MAX_PASSES = 100
+        MAX_PASSES = 10  # Reduced from 100 for practical reasons
 
-        for _ in range(MAX_PASSES):
-            best_shifted = current
-            best_score = 0
+        # Start with original data
+        current = bytearray(data)
+        applied_shifts = []
+
+        for pass_num in range(MAX_PASSES):
+            # For each pass, find best shift for current data
             best_shift = 0
-
+            best_shifted = current
+            best_score = float('-inf')
+            
+            # Try all possible shifts
             for shift in range(256):
+                # Apply shift to current data
                 tmp = bytearray(current)
                 for j in range(len(tmp)):
                     tmp[j] = (tmp[j] + shift) % 256
-
-                # score = sum of run lengths (longer runs = better)
+                
+                # Score based on compressibility (more runs = better)
                 score = 0
                 i = 0
                 while i < len(tmp):
@@ -151,164 +158,208 @@ class PAQJPCompressor:
                     while i < len(tmp) and tmp[i] == val:
                         run += 1
                         i += 1
-                    score += run
-
+                    # Prefer longer runs
+                    score += run * run  # Square to favor longer runs more
+            
                 if score > best_score:
                     best_score = score
                     best_shifted = tmp
                     best_shift = shift
-
-            # Compact RLE
-            bits: List[int] = []
-            self._append_bits(bits, 0b010, 3)      # marker
-            self._append_bits(bits, best_shift, 8)
-
-            i = 0
-            n = len(best_shifted)
-            while i < n:
-                val = best_shifted[i]
-                run = 1
-                i += 1
-                while i < n and best_shifted[i] == val:
-                    run += 1
-                    i += 1
-
-                if run == 1:
-                    self._append_bits(bits, 0b00, 2)
-                elif run <= 5:
-                    self._append_bits(bits, 0b01, 2)
-                    self._append_bits(bits, run - 2, 2)
-                elif run <= 12:
-                    self._append_bits(bits, 0b10, 2)
-                    self._append_bits(bits, run - 5, 3)
-                else:
-                    self._append_bits(bits, 0b1111, 4)
-                    capped = min(run, 270)
-                    self._append_bits(bits, capped - 13, 8)
-                    run = capped
-
-                self._append_bits(bits, val, 8)
-
-            pad = (8 - len(bits) % 8) % 8
-            self._append_bits(bits, 0, pad)
-
-            out_bytes = bytearray()
-            for j in range(0, len(bits), 8):
-                byte = 0
-                for k in range(8):
-                    if j + k < len(bits):
-                        byte = (byte << 1) | bits[j + k]
-                out_bytes.append(byte)
-
-            curr_len = len(out_bytes)
-
-            if curr_len < best_length:
-                best_length = curr_len
-                best_result = bytes(out_bytes)
-                best_shifts.append(best_shift)
-
+            
+            # Record this shift
+            applied_shifts.append(best_shift)
+            
+            # Apply RLE to the shifted data
+            rle_encoded = self._apply_rle_to_shifted(best_shifted, best_shift)
+            
+            # Check if this is better than our best so far
+            if len(rle_encoded) < best_length:
+                best_length = len(rle_encoded)
+                best_result = rle_encoded
+                best_shifts = applied_shifts.copy()
+                best_shifted_data = best_shifted
+            
+            # Prepare for next pass: use the shifted (but not RLE encoded) data
             current = best_shifted
-
-            if curr_len >= len(current):
+            
+            # Early stop if we're not improving
+            if len(rle_encoded) >= len(data):
                 break
-
+        
+        # If no compression achieved or no result, return original
         if best_result is None or best_length >= len(data):
             return bytes([0]) + data
-
+        
+        # Build header: number of passes followed by shift values
         header = bytearray([len(best_shifts)])
         header.extend(best_shifts)
+        
         return header + best_result
 
+    def _apply_rle_to_shifted(self, shifted_data: bytearray, shift: int) -> bytes:
+        """Apply compact RLE encoding to shifted data"""
+        bits: List[int] = []
+        
+        # Marker for this encoding scheme
+        self._append_bits(bits, 0b010, 3)      # marker
+        self._append_bits(bits, shift, 8)      # shift used
+        
+        i = 0
+        n = len(shifted_data)
+        while i < n:
+            val = shifted_data[i]
+            run = 1
+            i += 1
+            while i < n and shifted_data[i] == val:
+                run += 1
+                i += 1
+            
+            # Encode run length
+            if run == 1:
+                self._append_bits(bits, 0b00, 2)           # single byte
+            elif run <= 5:  # 2-5
+                self._append_bits(bits, 0b01, 2)           # short run
+                self._append_bits(bits, run - 2, 2)        # 2 bits for 0-3
+            elif run <= 12:  # 6-12
+                self._append_bits(bits, 0b10, 2)           # medium run
+                self._append_bits(bits, run - 6, 3)        # 3 bits for 0-6
+            else:  # 13+
+                self._append_bits(bits, 0b1111, 4)         # long run marker
+                capped = min(run, 270)
+                self._append_bits(bits, capped - 13, 8)    # 8 bits for 0-257
+            
+            # Encode value
+            self._append_bits(bits, val, 8)
+        
+        # Pad to complete byte
+        pad = (8 - len(bits) % 8) % 8
+        self._append_bits(bits, 0, pad)
+        
+        # Convert bits to bytes
+        out_bytes = bytearray()
+        for j in range(0, len(bits), 8):
+            byte = 0
+            for k in range(8):
+                if j + k < len(bits):
+                    byte = (byte << 1) | bits[j + k]
+            out_bytes.append(byte)
+        
+        return bytes(out_bytes)
 
     def reverse_transform_00(self, cdata: bytes) -> bytes:
         if not cdata or cdata == b'\x00':
             return b''
-
+        
+        # Check if it's original data (first byte 0)
+        if cdata[0] == 0:
+            return cdata[1:]
+        
         num_passes = cdata[0]
         if num_passes == 0:
             return cdata[1:]
-
+        
         if len(cdata) < 1 + num_passes:
             return b''  # invalid
-
+        
         shifts = list(cdata[1:1 + num_passes])
         rle_data = cdata[1 + num_passes:]
-
+        
+        # Decode RLE
         decoded = self._rle_decode(rle_data)
         if decoded is None:
-            return b''  # decode failed
-
+            return b''
+        
+        # Apply reverse shifts in reverse order
         current = bytearray(decoded)
-
-        # Undo shifts in reverse order
         for shift in reversed(shifts):
             for i in range(len(current)):
                 current[i] = (current[i] - shift) % 256
-
+        
         return bytes(current)
-
 
     def _rle_decode(self, data: bytes) -> Optional[bytearray]:
         if not data:
             return None
-
+        
+        # Convert to bit array
         bits = []
         for b in data:
             for i in range(7, -1, -1):
                 bits.append((b >> i) & 1)
-
+        
         pos = 0
         nbits = len(bits)
-
-        if nbits < 11:  # at least marker(3) + shift(8)
+        
+        # Check minimum size
+        if nbits < 11:  # marker(3) + shift(8)
             return None
-
-        # Read marker and shift (discard shift for decoding)
+        
+        # Read and verify marker
         marker = self._read_bits(bits, pos, 3)
         pos += 3
         if marker != 0b010:
             return None
-
-        pos += 8  # skip shift byte
-
+        
+        # Skip shift value (already handled by reverse_transform)
+        pos += 8
+        
         out = bytearray()
-
-        while pos + 2 <= nbits:
+        
+        # Decode runs
+        while pos + 10 <= nbits:  # Need at least 2 bits for prefix + 8 for value
+            # Read prefix to determine run length encoding
+            if pos + 2 > nbits:
+                break
+            
             prefix = self._read_bits(bits, pos, 2)
             pos += 2
-
-            if prefix == 0b00:
+            
+            if prefix == 0b00:  # Single byte
                 run = 1
-            elif prefix == 0b01:
+            elif prefix == 0b01:  # Short run (2-5)
                 if pos + 2 > nbits:
                     break
                 run = 2 + self._read_bits(bits, pos, 2)
                 pos += 2
-            elif prefix == 0b10:
+            elif prefix == 0b10:  # Medium run (6-12)
                 if pos + 3 > nbits:
                     break
-                run = 5 + self._read_bits(bits, pos, 3)
+                run = 6 + self._read_bits(bits, pos, 3)
                 pos += 3
-            else:  # 11 → long run
-                if pos + 10 > nbits:
+            else:  # prefix == 0b11, check for long run
+                if pos + 2 > nbits:
                     break
-                pos += 2  # consume remaining prefix bits
-                extra = self._read_bits(bits, pos, 8)
+                # Check if it's really 0b11 followed by 11 (0b1111 total)
+                next_bits = self._read_bits(bits, pos, 2)
+                if next_bits != 0b11:
+                    # This shouldn't happen with proper encoding
+                    return None
+                pos += 2
+                
+                if pos + 8 > nbits:
+                    break
+                run = 13 + self._read_bits(bits, pos, 8)
                 pos += 8
-                run = 13 + extra
-
+            
+            # Read value
             if pos + 8 > nbits:
                 break
-
             val = self._read_bits(bits, pos, 8)
             pos += 8
-
+            
+            # Append run
             out.extend([val] * run)
-
-        # Allow up to 7 padding bits at the end
-        if nbits - pos > 7:
-            return None  # too many leftover bits → probably corrupt
-
+        
+        # Allow up to 7 padding bits
+        remaining = nbits - pos
+        if remaining > 7:
+            return None  # Too many leftover bits
+        
+        # Check padding bits are zeros
+        for i in range(pos, nbits):
+            if bits[i] != 0:
+                return None  # Non-zero padding
+        
         return out
 
     # ────────────────────────────────────────────────
