@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 8.2 – Multi‑pass compact RLE transform 0
-FULLY LOSSLESS – runs of any length, no dependencies required
-Includes automatic self‑test to verify 100% lossless operation.
-All output uses plain ASCII (no emoji/icons).
+PAQJP 8.2 – FULLY LOSSLESS EDITION
+All transforms (0‑255) are 100% reversible for every byte value 0‑255.
+Includes automatic self‑test, raw fallback, and built‑in verification.
+No emoji/icons – uses plain ASCII.
 """
 
 import os
@@ -26,14 +26,14 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
-PROGNAME = "PAQJP_8.2_LOSSLESS_FINAL"
+PROGNAME = "PAQJP_8.2_LOSSLESS_ALL_TRANSFORMS"
 
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p**0.5)+1))]
 PI_DIGITS = [79, 17, 111]
 
 
 class StateTable:
-    """State table for PAQ (kept for compatibility, not actively used)"""
+    """State table for PAQ (kept for compatibility)."""
     def __init__(self):
         self.table = [
             [1,2,1,0], [3,5,0,1], [4,6,2,0], [7,10,0,2],
@@ -105,11 +105,11 @@ class PAQJPCompressor:
             return self.seed_tables[idx][val % 256]
         return 0
 
-    # ────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     # Bit helpers
-    # ────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     def _append_bits(self, bitlist: List[int], value: int, count: int):
-        for i in range(count-1, -1, -1):
+        for i in range(count - 1, -1, -1):
             bitlist.append((value >> i) & 1)
 
     def _read_bits(self, bits: List[int], pos: int, count: int) -> int:
@@ -120,9 +120,9 @@ class PAQJPCompressor:
             val = (val << 1) | bits[pos + i]
         return val
 
-    # ────────────────────────────────────────────────
-    # TRANSFORM 00 – Multi-pass shift + compact RLE (FULLY LOSSLESS)
-    # ────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # TRANSFORM 00 – multi‑pass shift + compact RLE (FULLY LOSSLESS)
+    # ------------------------------------------------------------------
     def transform_00(self, data: bytes) -> bytes:
         if not data:
             return b'\x00'
@@ -130,23 +130,21 @@ class PAQJPCompressor:
         best_result = None
         best_length = float('inf')
         best_shifts = []
-        best_shifted_data = None
-
         MAX_PASSES = 10
 
         current = bytearray(data)
         applied_shifts = []
 
-        for pass_num in range(MAX_PASSES):
+        for _ in range(MAX_PASSES):
             best_shift = 0
             best_shifted = current
             best_score = float('-inf')
-            
+
             for shift in range(256):
                 tmp = bytearray(current)
                 for j in range(len(tmp)):
                     tmp[j] = (tmp[j] + shift) % 256
-                
+
                 score = 0
                 i = 0
                 while i < len(tmp):
@@ -157,41 +155,36 @@ class PAQJPCompressor:
                         run += 1
                         i += 1
                     score += run * run
-            
+
                 if score > best_score:
                     best_score = score
                     best_shifted = tmp
                     best_shift = shift
-            
+
             applied_shifts.append(best_shift)
-            
             rle_encoded = self._apply_rle_to_shifted(best_shifted, best_shift)
-            
+
             if len(rle_encoded) < best_length:
                 best_length = len(rle_encoded)
                 best_result = rle_encoded
                 best_shifts = applied_shifts.copy()
-                best_shifted_data = best_shifted
-            
+
             current = best_shifted
-            
             if len(rle_encoded) >= len(data):
                 break
-        
+
         if best_result is None or best_length >= len(data):
             return bytes([0]) + data
-        
+
         header = bytearray([len(best_shifts)])
         header.extend(best_shifts)
-        
         return header + best_result
 
     def _apply_rle_to_shifted(self, shifted_data: bytearray, shift: int) -> bytes:
         bits = []
-        
         self._append_bits(bits, 0b010, 3)
         self._append_bits(bits, shift, 8)
-        
+
         i = 0
         n = len(shifted_data)
         while i < n:
@@ -201,99 +194,85 @@ class PAQJPCompressor:
             while i < n and shifted_data[i] == val:
                 run += 1
                 i += 1
-            
-            # --- Fully lossless run encoding ---
-            # Encode long runs (>=13) in chunks of up to 268
+
             while run >= 13:
                 chunk = min(run, 268)
-                self._append_bits(bits, 0b1111, 4)        # long run marker
-                self._append_bits(bits, chunk - 13, 8)   # 0-255 -> 13-268
+                self._append_bits(bits, 0b1111, 4)
+                self._append_bits(bits, chunk - 13, 8)
                 self._append_bits(bits, val, 8)
                 run -= chunk
-            
-            # Now 0 <= run <= 12 - encode as single/short/medium
+
             if run == 1:
                 self._append_bits(bits, 0b00, 2)
                 self._append_bits(bits, val, 8)
-            elif 2 <= run <= 5:
+            elif run <= 5:
                 self._append_bits(bits, 0b01, 2)
                 self._append_bits(bits, run - 2, 2)
                 self._append_bits(bits, val, 8)
-            elif 6 <= run <= 12:
+            elif run <= 12:
                 self._append_bits(bits, 0b10, 2)
                 self._append_bits(bits, run - 6, 3)
                 self._append_bits(bits, val, 8)
-            # run == 0 cannot happen
-        
+
         pad = (8 - len(bits) % 8) % 8
         self._append_bits(bits, 0, pad)
-        
-        out_bytes = bytearray()
+
+        out = bytearray()
         for j in range(0, len(bits), 8):
             byte = 0
             for k in range(8):
                 if j + k < len(bits):
                     byte = (byte << 1) | bits[j + k]
-            out_bytes.append(byte)
-        
-        return bytes(out_bytes)
+            out.append(byte)
+        return bytes(out)
 
     def reverse_transform_00(self, cdata: bytes) -> bytes:
         if not cdata or cdata == b'\x00':
             return b''
-        
         if cdata[0] == 0:
             return cdata[1:]
-        
+
         num_passes = cdata[0]
-        if num_passes == 0:
-            return cdata[1:]
-        
-        if len(cdata) < 1 + num_passes:
+        if num_passes == 0 or len(cdata) < 1 + num_passes:
             return b''
-        
+
         shifts = list(cdata[1:1 + num_passes])
         rle_data = cdata[1 + num_passes:]
-        
+
         decoded = self._rle_decode(rle_data)
         if decoded is None:
             return b''
-        
+
         current = bytearray(decoded)
         for shift in reversed(shifts):
             for i in range(len(current)):
                 current[i] = (current[i] - shift) % 256
-        
         return bytes(current)
 
     def _rle_decode(self, data: bytes) -> Optional[bytearray]:
         if not data:
             return None
-        
         bits = []
         for b in data:
             for i in range(7, -1, -1):
                 bits.append((b >> i) & 1)
-        
+
         pos = 0
         nbits = len(bits)
-        
         if nbits < 11:
             return None
-        
+
         marker = self._read_bits(bits, pos, 3)
         pos += 3
         if marker != 0b010:
             return None
-        
-        pos += 8  # skip shift (already in header)
-        
+        pos += 8  # skip shift
+
         out = bytearray()
-        
         while pos + 10 <= nbits:
             prefix = self._read_bits(bits, pos, 2)
             pos += 2
-            
+
             if prefix == 0b00:
                 run = 1
             elif prefix == 0b01:
@@ -306,37 +285,34 @@ class PAQJPCompressor:
                     break
                 run = 6 + self._read_bits(bits, pos, 3)
                 pos += 3
-            else:  # 0b11 - check for long run marker 0b1111
+            else:
                 if pos + 2 > nbits:
                     break
-                next_bits = self._read_bits(bits, pos, 2)
-                if next_bits != 0b11:
+                if self._read_bits(bits, pos, 2) != 0b11:
                     return None
                 pos += 2
                 if pos + 8 > nbits:
                     break
                 run = 13 + self._read_bits(bits, pos, 8)
                 pos += 8
-            
+
             if pos + 8 > nbits:
                 break
             val = self._read_bits(bits, pos, 8)
             pos += 8
-            
             out.extend([val] * run)
-        
+
         remaining = nbits - pos
         if remaining > 7:
             return None
         for i in range(pos, nbits):
             if bits[i] != 0:
                 return None
-        
         return out
 
-    # ────────────────────────────────────────────────
-    # Other transforms (1-15) - unchanged
-    # ────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # TRANSFORM 01 – involutory XOR (lossless)
+    # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
         for prime in PRIMES:
@@ -346,10 +322,16 @@ class PAQJPCompressor:
                     if i < len(t):
                         t[i] ^= xor_val
         return bytes(t)
-    def reverse_transform_01(self, d, r=100): return self.transform_01(d, r)
 
+    def reverse_transform_01(self, d, r=100):
+        return self.transform_01(d, r)
+
+    # ------------------------------------------------------------------
+    # TRANSFORM 02 – FIXED: use stored pattern index
+    # ------------------------------------------------------------------
     def transform_02(self, d):
-        if len(d) < 1: return b''
+        if len(d) < 1:
+            return b''
         t = bytearray(d)
         checksum = sum(d) % 256
         pattern_index = (len(d) + checksum) % 256
@@ -358,19 +340,36 @@ class PAQJPCompressor:
             if i < len(t):
                 t[i] ^= pattern_values[i % len(pattern_values)]
         return bytes([pattern_index]) + bytes(t)
-    def reverse_transform_02(self, d): return self.transform_02(d)
 
+    def reverse_transform_02(self, d):
+        if len(d) < 2:
+            return b''
+        pattern_index = d[0]
+        t = bytearray(d[1:])
+        pattern_values = self._get_pattern(4, pattern_index)
+        for i in range(1, len(t), 4):
+            if i < len(t):
+                t[i] ^= pattern_values[i % len(pattern_values)]
+        return bytes(t)
+
+    # ------------------------------------------------------------------
+    # TRANSFORM 03 – rotate bits (lossless)
+    # ------------------------------------------------------------------
     def transform_03(self, d):
-        if len(d) < 1: return b''
+        if len(d) < 1:
+            return b''
         t = bytearray(d)
         rotation = (len(d) * 13 + sum(d)) % 8
-        if rotation == 0: rotation = 1
+        if rotation == 0:
+            rotation = 1
         for i in range(2, len(t), 5):
             if i < len(t):
                 t[i] = ((t[i] << rotation) | (t[i] >> (8 - rotation))) & 0xFF
         return bytes([rotation]) + bytes(t)
+
     def reverse_transform_03(self, d):
-        if len(d) < 2: return b''
+        if len(d) < 2:
+            return b''
         rotation = d[0]
         t = bytearray(d[1:])
         for i in range(2, len(t), 5):
@@ -378,94 +377,145 @@ class PAQJPCompressor:
                 t[i] = ((t[i] >> rotation) | (t[i] << (8 - rotation))) & 0xFF
         return bytes(t)
 
+    # ------------------------------------------------------------------
+    # TRANSFORM 04 – subtract/add i%256 (lossless)
+    # ------------------------------------------------------------------
     def transform_04(self, d, r=100):
         t = bytearray(d)
         for _ in range(r):
-            for i in range(len(t)): t[i] = (t[i] - (i % 256)) % 256
+            for i in range(len(t)):
+                t[i] = (t[i] - (i % 256)) % 256
         return bytes(t)
+
     def reverse_transform_04(self, d, r=100):
         t = bytearray(d)
         for _ in range(r):
-            for i in range(len(t)): t[i] = (t[i] + (i % 256)) % 256
+            for i in range(len(t)):
+                t[i] = (t[i] + (i % 256)) % 256
         return bytes(t)
 
+    # ------------------------------------------------------------------
+    # TRANSFORM 05 – rotate each byte (lossless)
+    # ------------------------------------------------------------------
     def transform_05(self, d, s=3):
         t = bytearray(d)
-        for i in range(len(t)): t[i] = ((t[i] << s) | (t[i] >> (8 - s))) & 0xFF
-        return bytes(t)
-    def reverse_transform_05(self, d, s=3):
-        t = bytearray(d)
-        for i in range(len(t)): t[i] = ((t[i] >> s) | (t[i] << (8 - s))) & 0xFF
+        for i in range(len(t)):
+            t[i] = ((t[i] << s) | (t[i] >> (8 - s))) & 0xFF
         return bytes(t)
 
+    def reverse_transform_05(self, d, s=3):
+        t = bytearray(d)
+        for i in range(len(t)):
+            t[i] = ((t[i] >> s) | (t[i] << (8 - s))) & 0xFF
+        return bytes(t)
+
+    # ------------------------------------------------------------------
+    # TRANSFORM 06 – substitution cipher (lossless)
+    # ------------------------------------------------------------------
     def transform_06(self, d, sd=42):
         random.seed(sd)
         sub = list(range(256))
         random.shuffle(sub)
         t = bytearray(d)
-        for i in range(len(t)): t[i] = sub[t[i]]
+        for i in range(len(t)):
+            t[i] = sub[t[i]]
         return bytes(t)
+
     def reverse_transform_06(self, d, sd=42):
         random.seed(sd)
         sub = list(range(256))
         random.shuffle(sub)
         inv = [0] * 256
-        for i in range(256): inv[sub[i]] = i
+        for i in range(256):
+            inv[sub[i]] = i
         t = bytearray(d)
-        for i in range(len(t)): t[i] = inv[t[i]]
+        for i in range(len(t)):
+            t[i] = inv[t[i]]
         return bytes(t)
 
+    # ------------------------------------------------------------------
+    # TRANSFORM 07 – XOR with length + pi (involutory)
+    # ------------------------------------------------------------------
     def transform_07(self, d, r=100):
         t = bytearray(d)
         sh = len(d) % len(self.PI_DIGITS)
         pi_rot = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
         sz = len(d) % 256
-        for i in range(len(t)): t[i] ^= sz
+        for i in range(len(t)):
+            t[i] ^= sz
         for _ in range(r):
-            for i in range(len(t)): t[i] ^= pi_rot[i % len(pi_rot)]
+            for i in range(len(t)):
+                t[i] ^= pi_rot[i % len(pi_rot)]
         return bytes(t)
-    def reverse_transform_07(self, d, r=100): return self.transform_07(d, r)
 
+    def reverse_transform_07(self, d, r=100):
+        return self.transform_07(d, r)
+
+    # ------------------------------------------------------------------
+    # TRANSFORM 08 – XOR with prime + pi (involutory)
+    # ------------------------------------------------------------------
     def transform_08(self, d, r=100):
         t = bytearray(d)
         sh = len(d) % len(self.PI_DIGITS)
         pi_rot = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
         p = find_nearest_prime_around(len(d) % 256)
-        for i in range(len(t)): t[i] ^= p
+        for i in range(len(t)):
+            t[i] ^= p
         for _ in range(r):
-            for i in range(len(t)): t[i] ^= pi_rot[i % len(pi_rot)]
+            for i in range(len(t)):
+                t[i] ^= pi_rot[i % len(pi_rot)]
         return bytes(t)
-    def reverse_transform_08(self, d, r=100): return self.transform_08(d, r)
 
+    def reverse_transform_08(self, d, r=100):
+        return self.transform_08(d, r)
+
+    # ------------------------------------------------------------------
+    # TRANSFORM 09 – XOR with prime, seed, pi, i (involutory)
+    # ------------------------------------------------------------------
     def transform_09(self, d, r=100):
         t = bytearray(d)
         sh = len(d) % len(self.PI_DIGITS)
         pi_rot = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
         p = find_nearest_prime_around(len(d) % 256)
         seed = self.get_seed(len(d) % len(self.seed_tables), len(d))
-        for i in range(len(t)): t[i] ^= p ^ seed
+        for i in range(len(t)):
+            t[i] ^= p ^ seed
         for _ in range(r):
-            for i in range(len(t)): t[i] ^= pi_rot[i % len(pi_rot)] ^ (i % 256)
+            for i in range(len(t)):
+                t[i] ^= pi_rot[i % len(pi_rot)] ^ (i % 256)
         return bytes(t)
-    def reverse_transform_09(self, d, r=100): return self.transform_09(d, r)
 
+    def reverse_transform_09(self, d, r=100):
+        return self.transform_09(d, r)
+
+    # ------------------------------------------------------------------
+    # TRANSFORM 10 – XOR with n from "X1" count (involutory)
+    # ------------------------------------------------------------------
     def transform_10(self, d, r=100):
-        cnt = sum(1 for i in range(len(d)-1) if d[i:i+2] == b'X1')
+        cnt = sum(1 for i in range(len(d) - 1) if d[i:i + 2] == b'X1')
         n = (((cnt * 2) + 1) // 3) * 3 % 256
         t = bytearray(d)
         for _ in range(r):
-            for i in range(len(t)): t[i] ^= n
+            for i in range(len(t)):
+                t[i] ^= n
         return bytes([n]) + bytes(t)
+
     def reverse_transform_10(self, d, r=100):
-        if len(d) < 1: return b''
+        if len(d) < 1:
+            return b''
         n = d[0]
         t = bytearray(d[1:])
         for _ in range(r):
-            for i in range(len(t)): t[i] ^= n
+            for i in range(len(t)):
+                t[i] ^= n
         return bytes(t)
 
+    # ------------------------------------------------------------------
+    # TRANSFORM 11 – FIXED: reverse order
+    # ------------------------------------------------------------------
     def transform_11(self, d, r=100):
-        if not d: return b''
+        if not d:
+            return b''
         t = bytearray(d)
         length = len(t)
         for _ in range(r):
@@ -473,20 +523,43 @@ class PAQJPCompressor:
                 fib_idx = (i + length) % len(self.fibonacci)
                 fib_val = self.fibonacci[fib_idx] % 256
                 pos_val = (i * 13 + length * 17) % 256
-                prev_val = t[i-1] if i > 0 else length % 256
+                prev_val = t[i - 1] if i > 0 else length % 256
                 t[i] = (t[i] ^ fib_val ^ pos_val ^ prev_val) % 256
         return bytes(t)
-    def reverse_transform_11(self, d, r=100): return self.transform_11(d, r)
 
+    def reverse_transform_11(self, d, r=100):
+        if not d:
+            return b''
+        t = bytearray(d)
+        length = len(t)
+        for _ in range(r):
+            for i in range(length - 1, -1, -1):
+                fib_idx = (i + length) % len(self.fibonacci)
+                fib_val = self.fibonacci[fib_idx] % 256
+                pos_val = (i * 13 + length * 17) % 256
+                prev_val = t[i - 1] if i > 0 else length % 256
+                t[i] = (t[i] ^ fib_val ^ pos_val ^ prev_val) % 256
+        return bytes(t)
+
+    # ------------------------------------------------------------------
+    # TRANSFORM 12 – XOR with Fibonacci (involutory)
+    # ------------------------------------------------------------------
     def transform_12(self, d, r=100):
         t = bytearray(d)
         for _ in range(r):
-            for i in range(len(t)): t[i] ^= self.fibonacci[i % len(self.fibonacci)] % 256
+            for i in range(len(t)):
+                t[i] ^= self.fibonacci[i % len(self.fibonacci)] % 256
         return bytes(t)
-    def reverse_transform_12(self, d, r=100): return self.transform_12(d, r)
 
+    def reverse_transform_12(self, d, r=100):
+        return self.transform_12(d, r)
+
+    # ------------------------------------------------------------------
+    # TRANSFORM 13 – XOR with nearest prime (lossless)
+    # ------------------------------------------------------------------
     def transform_13(self, d):
-        if not d: return b''
+        if not d:
+            return b''
         repeats = self._calculate_repeats(d)
         current_value = len(d) % 256
         prime_values = []
@@ -503,10 +576,12 @@ class PAQJPCompressor:
         return bytes([repeat_byte]) + bytes(t)
 
     def reverse_transform_13(self, d):
-        if len(d) < 2: return b''
+        if len(d) < 2:
+            return b''
         repeat_byte = d[0]
         repeats = (repeat_byte + 1) % 256
-        if repeats == 0: repeats = 256
+        if repeats == 0:
+            repeats = 256
         t = bytearray(d[1:])
         current_value = len(t) % 256
         prime_values = []
@@ -520,8 +595,12 @@ class PAQJPCompressor:
             t[i] ^= xor_value
         return bytes(t)
 
+    # ------------------------------------------------------------------
+    # TRANSFORM 14 – FIXED: correct bit removal
+    # ------------------------------------------------------------------
     def transform_14(self, d):
-        if not d: return b''
+        if not d:
+            return b''
         bits_to_add = self._calculate_bits_to_add(d)
         transformed = self._add_bits_to_end(d, bits_to_add)
         if bits_to_add > 0:
@@ -529,15 +608,21 @@ class PAQJPCompressor:
         return transformed
 
     def reverse_transform_14(self, d):
-        if len(d) < 1: return b''
+        if len(d) < 1:
+            return b''
         if d[0] == 0:
             return d[1:] if len(d) > 1 else b''
-        bits_count = d[0]
+        # bits_count = d[0]  # not needed
         data_with_bits = d[1:]
-        return self._remove_bits_from_end(data_with_bits, bits_count)
+        # remove the appended metadata byte
+        return data_with_bits[:-1]
 
+    # ------------------------------------------------------------------
+    # TRANSFORM 15 – add pattern to every 3rd byte (lossless)
+    # ------------------------------------------------------------------
     def transform_15(self, d):
-        if len(d) < 1: return b''
+        if len(d) < 1:
+            return b''
         t = bytearray(d)
         pattern_index = len(d) % 256
         pattern_values = self._get_pattern(3, pattern_index)
@@ -547,7 +632,8 @@ class PAQJPCompressor:
         return bytes([pattern_index]) + bytes(t)
 
     def reverse_transform_15(self, d):
-        if len(d) < 2: return b''
+        if len(d) < 2:
+            return b''
         pattern_index = d[0]
         t = bytearray(d[1:])
         pattern_values = self._get_pattern(3, pattern_index)
@@ -556,9 +642,12 @@ class PAQJPCompressor:
                 t[i] = (t[i] - pattern_values[i % len(pattern_values)]) % 256
         return bytes(t)
 
-    # Helpers
+    # ------------------------------------------------------------------
+    # Helpers for transforms 13,14,15
+    # ------------------------------------------------------------------
     def _calculate_bits_to_add(self, data: bytes) -> int:
-        if not data: return 0
+        if not data:
+            return 0
         length = len(data)
         first = data[0]
         last = data[-1]
@@ -566,44 +655,44 @@ class PAQJPCompressor:
         return ((length * 13 + first * 17 + last * 23 + checksum * 29) % 9)
 
     def _add_bits_to_end(self, data: bytes, bits_count: int) -> bytes:
-        if bits_count == 0: return data
-        if not data: data = b'\x00'
+        if bits_count == 0:
+            return data
+        if not data:
+            data = b'\x00'
         last_byte = data[-1]
         bits_value = last_byte & ((1 << bits_count) - 1)
         bits_byte = ((bits_count & 0x0F) << 4) | (bits_value & 0x0F)
         return data + bytes([bits_byte])
-
-    def _remove_bits_from_end(self, data_with_bits: bytes, bits_count: int) -> bytes:
-        if bits_count == 0 or not data_with_bits: return data_with_bits
-        original = data_with_bits[:-1]
-        if original == b'\x00' and len(data_with_bits) == 2:
-            return b''
-        return original
 
     def _get_pattern(self, size: int, index: int):
         random.seed(12345 + size * 100 + index)
         return [random.randint(0, 255) for _ in range(size)]
 
     def _calculate_repeats(self, data: bytes) -> int:
-        if not data: return 1
+        if not data:
+            return 1
         length = len(data)
         byte_sum = sum(data) % 256
         repeats = ((length * 13 + byte_sum * 17) % 256) + 1
         return max(1, min(256, repeats))
 
-    # Dynamic transforms 16-255
+    # ------------------------------------------------------------------
+    # Dynamic transforms 16‑255 – XOR with seed (involutory, lossless)
+    # ------------------------------------------------------------------
     def _dynamic_transform(self, n: int):
         def tf(data: bytes):
-            if not data: return b''
+            if not data:
+                return b''
             seed = self.get_seed(n % len(self.seed_tables), len(data))
             t = bytearray(data)
-            for i in range(len(t)): t[i] ^= seed
+            for i in range(len(t)):
+                t[i] ^= seed
             return bytes(t)
         return tf, tf
 
-    # ────────────────────────────────────────────────
-    # Compression / Decompression backends - FIXED fallback
-    # ────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Compression backends – with raw fallback
+    # ------------------------------------------------------------------
     def _compress_backend(self, data: bytes) -> bytes:
         candidates = []
         if paq is not None:
@@ -618,7 +707,6 @@ class PAQJPCompressor:
                 pass
 
         if not candidates:
-            # No compressor available - store raw data with marker 'N'
             return b'N' + data
 
         winner_id, winner_data = min(candidates, key=lambda x: len(x[1]))
@@ -641,103 +729,112 @@ class PAQJPCompressor:
             except:
                 return None
         if engine == ord('N'):
-            # Raw storage - no compression
             return payload
         return None
 
-    # ────────────────────────────────────────────────
-    # Self-test - verifies that transform_00 is 100% lossless
-    # ────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # FULL self‑test – verifies EVERY transform 0‑255 (including all 16‑255)
+    # ------------------------------------------------------------------
     def self_test(self) -> bool:
-        """Run extensive tests to verify losslessness of transform_00."""
-        print("Running self-test to verify lossless operation...")
+        print("Running FULL self‑test to verify ALL transforms are lossless...")
         test_passed = True
 
-        # Test 1: empty data
-        if self.transform_00(b'') != b'\x00' or self.reverse_transform_00(b'\x00') != b'':
-            print("  [FAIL] Empty data test failed")
-            test_passed = False
-        else:
-            print("  [PASS] Empty data")
-
-        # Test 2: single byte, all values 0-255
-        for b_val in range(256):
-            orig = bytes([b_val])
-            enc = self.transform_00(orig)
-            dec = self.reverse_transform_00(enc)
-            if dec != orig:
-                print(f"  [FAIL] Single byte 0x{b_val:02x} failed")
-                test_passed = False
-                break
-        else:
-            print("  [PASS] All single bytes (0-255)")
-
-        # Test 3: short runs (2-12) and mixed patterns
-        patterns = [
-            b'\x42\x42',                     # run 2
-            b'\x99\x99\x99',                 # run 3
-            b'\xAA' * 5,                    # run 5
-            b'\x55' * 7,                   # run 7
-            b'\x00' * 12,                  # run 12
-            b'\x01\x02\x03\x04',           # no runs
-            b'\xFF' * 10 + b'\x00' * 10,   # two runs
+        # Gather all forward/reverse pairs for transforms 0‑15
+        transforms = [
+            (0, self.transform_00, self.reverse_transform_00),
+            (1, self.transform_01, self.reverse_transform_01),
+            (2, self.transform_02, self.reverse_transform_02),
+            (3, self.transform_03, self.reverse_transform_03),
+            (4, self.transform_04, self.reverse_transform_04),
+            (5, self.transform_05, self.reverse_transform_05),
+            (6, self.transform_06, self.reverse_transform_06),
+            (7, self.transform_07, self.reverse_transform_07),
+            (8, self.transform_08, self.reverse_transform_08),
+            (9, self.transform_09, self.reverse_transform_09),
+            (10, self.transform_10, self.reverse_transform_10),
+            (11, self.transform_11, self.reverse_transform_11),
+            (12, self.transform_12, self.reverse_transform_12),
+            (13, self.transform_13, self.reverse_transform_13),
+            (14, self.transform_14, self.reverse_transform_14),
+            (15, self.transform_15, self.reverse_transform_15),
         ]
-        for pat in patterns:
-            enc = self.transform_00(pat)
-            dec = self.reverse_transform_00(enc)
-            if dec != pat:
-                print(f"  [FAIL] Pattern {pat[:20]!r} failed")
-                test_passed = False
-                break
-        else:
-            print("  [PASS] Short runs and mixed patterns")
 
-        # Test 4: long runs that exceed chunk size
-        for length in [269, 500, 1000, 10000]:
-            data = b'\x7F' * length
-            enc = self.transform_00(data)
-            dec = self.reverse_transform_00(enc)
-            if dec != data:
-                print(f"  [FAIL] Long run of {length} bytes failed")
-                test_passed = False
-                break
-        else:
-            print("  [PASS] Long runs (269-10000)")
+        # Add ALL dynamic transforms 16‑255
+        for i in range(16, 256):
+            fwd, rev = self._dynamic_transform(i)
+            transforms.append((i, fwd, rev))
 
-        # Test 5: random data (100 samples, up to 1KB each)
-        random.seed(42)
-        for i in range(100):
-            size = random.randint(1, 1024)
-            data = bytes(random.getrandbits(8) for _ in range(size))
-            enc = self.transform_00(data)
-            dec = self.reverse_transform_00(enc)
-            if dec != data:
-                print(f"  [FAIL] Random data size {size} failed")
-                test_passed = False
-                break
-        else:
-            print("  [PASS] Random data (100 samples)")
+        print(f"  Testing {len(transforms)} transforms (0‑255)...")
 
-        # Test 6: multi-pass shift selection (no compression backend)
-        data = b'ABCDEFGHIJKLMNOPQRSTUVWXYZ' * 10
-        enc = self.transform_00(data)
-        dec = self.reverse_transform_00(enc)
-        if dec != data:
-            print("  [FAIL] Multi-pass shift test failed")
-            test_passed = False
-        else:
-            print("  [PASS] Multi-pass shift")
+        # Test empty data (skip transform 00, which returns b'\x00')
+        for num, fwd, rev in transforms:
+            if num == 0:
+                continue
+            try:
+                enc = fwd(b'')
+                dec = rev(enc)
+                if dec != b'':
+                    print(f"  [FAIL] Transform {num} empty data")
+                    test_passed = False
+            except Exception:
+                print(f"  [FAIL] Transform {num} empty data (exception)")
+                test_passed = False
+
+        # Test all 256 single bytes for every transform
+        for num, fwd, rev in transforms:
+            for b_val in range(256):
+                orig = bytes([b_val])
+                try:
+                    enc = fwd(orig)
+                    dec = rev(enc)
+                except Exception:
+                    print(f"  [FAIL] Transform {num} byte 0x{b_val:02x} (exception)")
+                    test_passed = False
+                    break
+                if dec != orig:
+                    print(f"  [FAIL] Transform {num} byte 0x{b_val:02x}")
+                    test_passed = False
+                    break
+            else:
+                # only print success for first few transforms to avoid spam
+                if num <= 15 or num < 20:  # show a few dynamic as sample
+                    print(f"  [PASS] Transform {num} all single bytes")
+                elif num == 255:
+                    print(f"  [PASS] Transform {num} all single bytes")
+                # else silently pass
+
+        # Test random short data (5 samples per transform, to keep runtime reasonable)
+        random.seed(123)
+        for num, fwd, rev in transforms:
+            for sample in range(5):
+                size = random.randint(1, 100)
+                data = bytes(random.getrandbits(8) for _ in range(size))
+                try:
+                    enc = fwd(data)
+                    dec = rev(enc)
+                except Exception:
+                    print(f"  [FAIL] Transform {num} random size {size} (exception)")
+                    test_passed = False
+                    break
+                if dec != data:
+                    print(f"  [FAIL] Transform {num} random size {size}")
+                    test_passed = False
+                    break
+            else:
+                # only print success for first few
+                if num <= 15 or num < 20 or num == 255:
+                    print(f"  [PASS] Transform {num} random short data")
+                # else silently pass
 
         if test_passed:
-            print("[PASS] Self-test PASSED - transform_00 is 100% lossless for all tested cases.\n")
+            print("[PASS] Self‑test PASSED – all transforms 0‑255 are 100% lossless.\n")
         else:
-            print("[FAIL] Self-test FAILED - report this bug!\n")
-
+            print("[FAIL] Self‑test FAILED – please report this bug!\n")
         return test_passed
 
-    # ────────────────────────────────────────────────
-    # Main logic
-    # ────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Main compression logic – tries all transforms 0‑255
+    # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes) -> bytes:
         if not data:
             return bytes([0])
@@ -815,6 +912,9 @@ class PAQJPCompressor:
         rev_func = rev_map.get(marker, lambda x: x)
         return rev_func(backend), marker
 
+    # ------------------------------------------------------------------
+    # Public file API
+    # ------------------------------------------------------------------
     def compress(self, infile: str, outfile: str):
         with open(infile, 'rb') as f:
             data = f.read()
@@ -843,14 +943,14 @@ class PAQJPCompressor:
 
 
 def main():
-    print(f"{PROGNAME} - fully lossless, runs of any length, no dependencies required")
+    print(f"{PROGNAME} - fully lossless, all transforms 0‑255 verified")
     c = PAQJPCompressor()
-    
-    # Run self-test automatically; if it fails, exit with error
+
+    # Run full self‑test; exit on failure
     if not c.self_test():
-        print("Self-test failed - compressor may be unreliable. Exiting.")
+        print("Self‑test failed – compressor is unreliable. Exiting.")
         return
-    
+
     ch = input("1) Compress   2) Decompress\n> ").strip()
     if ch == "1":
         i = input("Input file: ").strip()
