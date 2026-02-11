@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 8.2 – FULLY LOSSLESS EDITION
+PAQJP 8.2 – FULLY LOSSLESS EDITION (256 TRANSFORMS: 0‑255)
 All transforms (0‑255) are 100% reversible for every byte value 0‑255.
-Includes automatic self‑test, raw fallback, and built‑in verification.
+Transform 255 is the identity transform (no change) – no separate raw fallback.
+BUG FIXES:
+  - Transform 14 now ALWAYS prepends the bits‑to‑add byte → reversible even when bits_to_add == 0.
+  - Dynamic transforms only use markers 16‑254, marker 255 is identity → no conflict.
+  - Full pipeline self‑test now exercises all 256 transforms and the entire compress/decompress chain.
 No emoji/icons – uses plain ASCII.
 """
 
@@ -26,7 +30,7 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
-PROGNAME = "PAQJP_8.2_LOSSLESS_ALL_TRANSFORMS"
+PROGNAME = "PAQJP_8.2_LOSSLESS_256_TRANSFORMS"
 
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p**0.5)+1))]
 PI_DIGITS = [79, 17, 111]
@@ -596,25 +600,24 @@ class PAQJPCompressor:
         return bytes(t)
 
     # ------------------------------------------------------------------
-    # TRANSFORM 14 – FIXED: correct bit removal
+    # TRANSFORM 14 – FIXED: ALWAYS prepend bits_to_add byte
     # ------------------------------------------------------------------
     def transform_14(self, d):
         if not d:
-            return b''
+            return b'\x00'  # marker for empty data (reversible)
         bits_to_add = self._calculate_bits_to_add(d)
         transformed = self._add_bits_to_end(d, bits_to_add)
-        if bits_to_add > 0:
-            return bytes([bits_to_add]) + transformed
-        return transformed
+        # Always prepend the bits_to_add count byte
+        return bytes([bits_to_add]) + transformed
 
     def reverse_transform_14(self, d):
         if len(d) < 1:
             return b''
-        if d[0] == 0:
-            return d[1:] if len(d) > 1 else b''
-        # bits_count = d[0]  # not needed
+        bits_count = d[0]
         data_with_bits = d[1:]
-        # remove the appended metadata byte
+        if not data_with_bits:
+            return b''
+        # Remove the appended metadata byte
         return data_with_bits[:-1]
 
     # ------------------------------------------------------------------
@@ -643,6 +646,16 @@ class PAQJPCompressor:
         return bytes(t)
 
     # ------------------------------------------------------------------
+    # TRANSFORM 255 – Identity (lossless, no change)
+    # ------------------------------------------------------------------
+    def transform_255(self, d: bytes) -> bytes:
+        """Identity transform – returns the input unchanged."""
+        return d
+
+    def reverse_transform_255(self, d: bytes) -> bytes:
+        return d
+
+    # ------------------------------------------------------------------
     # Helpers for transforms 13,14,15
     # ------------------------------------------------------------------
     def _calculate_bits_to_add(self, data: bytes) -> int:
@@ -656,7 +669,8 @@ class PAQJPCompressor:
 
     def _add_bits_to_end(self, data: bytes, bits_count: int) -> bytes:
         if bits_count == 0:
-            return data
+            # No bits to add, still append a zero byte (metadata) for symmetry
+            return data + b'\x00'
         if not data:
             data = b'\x00'
         last_byte = data[-1]
@@ -677,7 +691,8 @@ class PAQJPCompressor:
         return max(1, min(256, repeats))
 
     # ------------------------------------------------------------------
-    # Dynamic transforms 16‑255 – XOR with seed (involutory, lossless)
+    # Dynamic transforms 16‑254 – XOR with seed (involutory, lossless)
+    # (Marker 255 is identity – see above)
     # ------------------------------------------------------------------
     def _dynamic_transform(self, n: int):
         def tf(data: bytes):
@@ -733,13 +748,13 @@ class PAQJPCompressor:
         return None
 
     # ------------------------------------------------------------------
-    # FULL self‑test – verifies EVERY transform 0‑255 (including all 16‑255)
+    # FULL self‑test – verifies EVERY transform 0‑255 and full pipeline
     # ------------------------------------------------------------------
     def self_test(self) -> bool:
-        print("Running FULL self‑test to verify ALL transforms are lossless...")
+        print("Running FULL self‑test to verify ALL transforms (0‑255) are lossless...")
         test_passed = True
 
-        # Gather all forward/reverse pairs for transforms 0‑15
+        # All transforms 0‑15 + dynamic 16‑254 + identity 255
         transforms = [
             (0, self.transform_00, self.reverse_transform_00),
             (1, self.transform_01, self.reverse_transform_01),
@@ -758,15 +773,15 @@ class PAQJPCompressor:
             (14, self.transform_14, self.reverse_transform_14),
             (15, self.transform_15, self.reverse_transform_15),
         ]
-
-        # Add ALL dynamic transforms 16‑255
-        for i in range(16, 256):
+        for i in range(16, 255):
             fwd, rev = self._dynamic_transform(i)
             transforms.append((i, fwd, rev))
+        # Add identity transform 255
+        transforms.append((255, self.transform_255, self.reverse_transform_255))
 
         print(f"  Testing {len(transforms)} transforms (0‑255)...")
 
-        # Test empty data (skip transform 00, which returns b'\x00')
+        # --- Test empty data (skip transform 00 because it returns b'\x00' and expects that) ---
         for num, fwd, rev in transforms:
             if num == 0:
                 continue
@@ -780,7 +795,7 @@ class PAQJPCompressor:
                 print(f"  [FAIL] Transform {num} empty data (exception)")
                 test_passed = False
 
-        # Test all 256 single bytes for every transform
+        # --- Test all 256 single bytes for every transform ---
         for num, fwd, rev in transforms:
             for b_val in range(256):
                 orig = bytes([b_val])
@@ -796,14 +811,10 @@ class PAQJPCompressor:
                     test_passed = False
                     break
             else:
-                # only print success for first few transforms to avoid spam
-                if num <= 15 or num < 20:  # show a few dynamic as sample
+                if num <= 15 or num % 50 == 0 or num == 255:
                     print(f"  [PASS] Transform {num} all single bytes")
-                elif num == 255:
-                    print(f"  [PASS] Transform {num} all single bytes")
-                # else silently pass
 
-        # Test random short data (5 samples per transform, to keep runtime reasonable)
+        # --- Test random short data (5 samples per transform, to keep runtime reasonable) ---
         random.seed(123)
         for num, fwd, rev in transforms:
             for sample in range(5):
@@ -821,27 +832,47 @@ class PAQJPCompressor:
                     test_passed = False
                     break
             else:
-                # only print success for first few
-                if num <= 15 or num < 20 or num == 255:
+                if num <= 15 or num % 50 == 0 or num == 255:
                     print(f"  [PASS] Transform {num} random short data")
-                # else silently pass
+
+        # --- EXTRA: Full pipeline test (compressor selects best transform, then decompresses) ---
+        print("\n  Testing full compression/decompression pipeline on random data...")
+        random.seed(456)
+        for test_num in range(100):
+            size = random.randint(1, 500)
+            data = bytes(random.getrandbits(8) for _ in range(size))
+            try:
+                compressed = self.compress_with_best(data)
+                decompressed, marker = self.decompress_with_best(compressed)
+            except Exception:
+                print(f"  [FAIL] Pipeline test #{test_num+1} (exception)")
+                test_passed = False
+                break
+            if decompressed != data:
+                print(f"  [FAIL] Pipeline test #{test_num+1} (marker {marker})")
+                test_passed = False
+                break
+        else:
+            print("  [PASS] Full pipeline (100 random inputs)")
 
         if test_passed:
-            print("[PASS] Self‑test PASSED – all transforms 0‑255 are 100% lossless.\n")
+            print("\n[PASS] Self‑test PASSED – all transforms 0‑255 are 100% lossless.\n")
         else:
-            print("[FAIL] Self‑test FAILED – please report this bug!\n")
+            print("\n[FAIL] Self‑test FAILED – please report this bug!\n")
         return test_passed
 
     # ------------------------------------------------------------------
-    # Main compression logic – tries all transforms 0‑255
+    # Main compression logic – tries ALL transforms 0‑255
+    # (Marker 255 is the identity transform – no separate raw fallback)
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes) -> bytes:
         if not data:
-            return bytes([0])
+            # Empty data: marker 255 (identity) + backend empty
+            return bytes([255]) + self._compress_backend(b'')
 
-        best_payload = self._compress_backend(data)
-        best_size = len(best_payload)
-        best_marker = 255
+        best_payload = None
+        best_size = float('inf')
+        best_marker = 255  # identity fallback
 
         transforms = [
             (0,   self.transform_00),
@@ -860,7 +891,8 @@ class PAQJPCompressor:
             (13,  self.transform_13),
             (14,  self.transform_14),
             (15,  self.transform_15),
-        ] + [(i, self._dynamic_transform(i)[0]) for i in range(16, 256)]
+        ] + [(i, self._dynamic_transform(i)[0]) for i in range(16, 255)] + \
+          [(255, self.transform_255)]
 
         for marker, func in transforms:
             try:
@@ -904,10 +936,11 @@ class PAQJPCompressor:
             13:   self.reverse_transform_13,
             14:   self.reverse_transform_14,
             15:   self.reverse_transform_15,
-            255:  lambda x: x,
         }
-        for i in range(16, 256):
+        for i in range(16, 255):
             rev_map[i] = self._dynamic_transform(i)[1]
+        # Marker 255 = identity transform
+        rev_map[255] = self.reverse_transform_255
 
         rev_func = rev_map.get(marker, lambda x: x)
         return rev_func(backend), marker
