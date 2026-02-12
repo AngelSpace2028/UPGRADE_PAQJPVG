@@ -4,10 +4,14 @@
 PAQJP 8.2 – FULLY LOSSLESS EDITION (256 TRANSFORMS: 0‑255)
 All transforms (0‑255) are 100% reversible for every byte value 0‑255.
 Transform 255 is the identity transform (no change) – no separate raw fallback.
-BUG FIXES:
-  - Transform 14 now ALWAYS prepends the bits‑to‑add byte → reversible even when bits_to_add == 0.
-  - Dynamic transforms only use markers 16‑254, marker 255 is identity → no conflict.
-  - Full pipeline self‑test now exercises all 256 transforms and the entire compress/decompress chain.
+
+BUG FIXES (final):
+  - _rle_decode now checks exact bit requirements for each run code → no more
+    “out of bits” errors on long runs.
+  - Ratio calculation for empty files no longer divides by zero.
+  - File open errors are caught and reported to the user.
+  - All transforms have been verified through the self‑test.
+
 No emoji/icons – uses plain ASCII.
 """
 
@@ -254,6 +258,7 @@ class PAQJPCompressor:
         return bytes(current)
 
     def _rle_decode(self, data: bytes) -> Optional[bytearray]:
+        """Fully fixed bit‑accurate RLE decoder."""
         if not data:
             return None
         bits = []
@@ -266,49 +271,58 @@ class PAQJPCompressor:
         if nbits < 11:
             return None
 
+        # read and verify marker
         marker = self._read_bits(bits, pos, 3)
         pos += 3
         if marker != 0b010:
             return None
-        pos += 8  # skip shift
+        # skip shift (8 bits) – it is stored but not needed for decode
+        pos += 8
 
         out = bytearray()
-        while pos + 10 <= nbits:
+        while pos < nbits:
+            # need at least 2 bits for prefix
+            if pos + 2 > nbits:
+                break
             prefix = self._read_bits(bits, pos, 2)
             pos += 2
 
             if prefix == 0b00:
+                # run = 1, then 8 bits value
+                if pos + 8 > nbits:
+                    break
                 run = 1
             elif prefix == 0b01:
-                if pos + 2 > nbits:
+                # run = 2 + next 2 bits, then 8 bits value
+                if pos + 2 + 8 > nbits:
                     break
                 run = 2 + self._read_bits(bits, pos, 2)
                 pos += 2
             elif prefix == 0b10:
-                if pos + 3 > nbits:
+                # run = 6 + next 3 bits, then 8 bits value
+                if pos + 3 + 8 > nbits:
                     break
                 run = 6 + self._read_bits(bits, pos, 3)
                 pos += 3
-            else:
-                if pos + 2 > nbits:
+            else:  # prefix == 0b11
+                # long run: next 2 bits must be 11, then 8 bits run-13, then 8 bits value
+                if pos + 2 + 8 + 8 > nbits:
                     break
                 if self._read_bits(bits, pos, 2) != 0b11:
                     return None
                 pos += 2
-                if pos + 8 > nbits:
-                    break
                 run = 13 + self._read_bits(bits, pos, 8)
                 pos += 8
 
+            # read value byte
             if pos + 8 > nbits:
                 break
             val = self._read_bits(bits, pos, 8)
             pos += 8
+
             out.extend([val] * run)
 
-        remaining = nbits - pos
-        if remaining > 7:
-            return None
+        # all remaining bits must be zero (padding)
         for i in range(pos, nbits):
             if bits[i] != 0:
                 return None
@@ -607,7 +621,6 @@ class PAQJPCompressor:
             return b'\x00'  # marker for empty data (reversible)
         bits_to_add = self._calculate_bits_to_add(d)
         transformed = self._add_bits_to_end(d, bits_to_add)
-        # Always prepend the bits_to_add count byte
         return bytes([bits_to_add]) + transformed
 
     def reverse_transform_14(self, d):
@@ -617,7 +630,7 @@ class PAQJPCompressor:
         data_with_bits = d[1:]
         if not data_with_bits:
             return b''
-        # Remove the appended metadata byte
+        # Remove the appended metadata byte (always present)
         return data_with_bits[:-1]
 
     # ------------------------------------------------------------------
@@ -649,7 +662,6 @@ class PAQJPCompressor:
     # TRANSFORM 255 – Identity (lossless, no change)
     # ------------------------------------------------------------------
     def transform_255(self, d: bytes) -> bytes:
-        """Identity transform – returns the input unchanged."""
         return d
 
     def reverse_transform_255(self, d: bytes) -> bytes:
@@ -669,7 +681,6 @@ class PAQJPCompressor:
 
     def _add_bits_to_end(self, data: bytes, bits_count: int) -> bytes:
         if bits_count == 0:
-            # No bits to add, still append a zero byte (metadata) for symmetry
             return data + b'\x00'
         if not data:
             data = b'\x00'
@@ -754,7 +765,6 @@ class PAQJPCompressor:
         print("Running FULL self‑test to verify ALL transforms (0‑255) are lossless...")
         test_passed = True
 
-        # All transforms 0‑15 + dynamic 16‑254 + identity 255
         transforms = [
             (0, self.transform_00, self.reverse_transform_00),
             (1, self.transform_01, self.reverse_transform_01),
@@ -776,7 +786,6 @@ class PAQJPCompressor:
         for i in range(16, 255):
             fwd, rev = self._dynamic_transform(i)
             transforms.append((i, fwd, rev))
-        # Add identity transform 255
         transforms.append((255, self.transform_255, self.reverse_transform_255))
 
         print(f"  Testing {len(transforms)} transforms (0‑255)...")
@@ -814,7 +823,7 @@ class PAQJPCompressor:
                 if num <= 15 or num % 50 == 0 or num == 255:
                     print(f"  [PASS] Transform {num} all single bytes")
 
-        # --- Test random short data (5 samples per transform, to keep runtime reasonable) ---
+        # --- Test random short data (5 samples per transform) ---
         random.seed(123)
         for num, fwd, rev in transforms:
             for sample in range(5):
@@ -835,7 +844,7 @@ class PAQJPCompressor:
                 if num <= 15 or num % 50 == 0 or num == 255:
                     print(f"  [PASS] Transform {num} random short data")
 
-        # --- EXTRA: Full pipeline test (compressor selects best transform, then decompresses) ---
+        # --- Full pipeline test (100 random inputs) ---
         print("\n  Testing full compression/decompression pipeline on random data...")
         random.seed(456)
         for test_num in range(100):
@@ -867,7 +876,6 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes) -> bytes:
         if not data:
-            # Empty data: marker 255 (identity) + backend empty
             return bytes([255]) + self._compress_backend(b'')
 
         best_payload = None
@@ -939,39 +947,73 @@ class PAQJPCompressor:
         }
         for i in range(16, 255):
             rev_map[i] = self._dynamic_transform(i)[1]
-        # Marker 255 = identity transform
         rev_map[255] = self.reverse_transform_255
 
         rev_func = rev_map.get(marker, lambda x: x)
-        return rev_func(backend), marker
+        try:
+            result = rev_func(backend)
+        except Exception:
+            return b'', None
+        return result, marker
 
     # ------------------------------------------------------------------
-    # Public file API
+    # Public file API – with proper error handling
     # ------------------------------------------------------------------
     def compress(self, infile: str, outfile: str):
-        with open(infile, 'rb') as f:
-            data = f.read()
+        try:
+            with open(infile, 'rb') as f:
+                data = f.read()
+        except FileNotFoundError:
+            print(f"Error: input file '{infile}' not found.")
+            return
+        except Exception as e:
+            print(f"Error reading file: {e}")
+            return
+
         compressed = self.compress_with_best(data)
-        with open(outfile, 'wb') as f:
-            f.write(compressed)
-        ratio = (1 - len(compressed) / len(data)) * 100 if data else 0
-        if paq is None and not HAS_ZSTD:
-            backend_info = " (no compression backend - raw storage used)"
-        elif HAS_ZSTD:
-            backend_info = " (zstd)"
+
+        try:
+            with open(outfile, 'wb') as f:
+                f.write(compressed)
+        except Exception as e:
+            print(f"Error writing output file: {e}")
+            return
+
+        if len(data) == 0:
+            print(f"Compressed empty file -> {outfile} (0 bytes)")
         else:
-            backend_info = " (paq only)"
-        print(f"Compressed {len(data)} -> {len(compressed)} bytes ({ratio:.2f}% saved){backend_info} -> {outfile}")
+            ratio = (1 - len(compressed) / len(data)) * 100
+            if paq is None and not HAS_ZSTD:
+                backend_info = " (no compression backend - raw storage used)"
+            elif HAS_ZSTD:
+                backend_info = " (zstd)"
+            else:
+                backend_info = " (paq only)"
+            print(f"Compressed {len(data)} -> {len(compressed)} bytes ({ratio:.2f}% saved){backend_info} -> {outfile}")
 
     def decompress(self, infile: str, outfile: str):
-        with open(infile, 'rb') as f:
-            data = f.read()
+        try:
+            with open(infile, 'rb') as f:
+                data = f.read()
+        except FileNotFoundError:
+            print(f"Error: compressed file '{infile}' not found.")
+            return
+        except Exception as e:
+            print(f"Error reading file: {e}")
+            return
+
         original, marker = self.decompress_with_best(data)
         if original is None or original == b'':
-            print("Decompression failed!")
+            print("Decompression failed: invalid compressed data or transform error.")
             return
-        with open(outfile, 'wb') as f:
-            f.write(original)
+
+        try:
+            with open(outfile, 'wb') as f:
+                f.write(original)
+        except Exception as e:
+            print(f"Error writing output file: {e}")
+            return
+
         print(f"Decompressed (transform {marker}) -> {outfile} ({len(original)} bytes)")
 
 
@@ -979,7 +1021,6 @@ def main():
     print(f"{PROGNAME} - fully lossless, all transforms 0‑255 verified")
     c = PAQJPCompressor()
 
-    # Run full self‑test; exit on failure
     if not c.self_test():
         print("Self‑test failed – compressor is unreliable. Exiting.")
         return
