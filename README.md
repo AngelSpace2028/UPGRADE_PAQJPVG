@@ -1,4 +1,4 @@
-UPGRADE\_PAQJPVG Compression hybrid Software Working
+UPGRADE\_PAQJPVG Compression hybrid Software Working right without bugs and without Errors
 
 
 
