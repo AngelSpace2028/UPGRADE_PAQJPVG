@@ -1,0 +1,2 @@
+@Jurijus Pacalovas: Please full code of all 256 transformations for 16-254 Can we change from16-254 for 1-256 bytes and change 2r size of circle from 256 to 40 bytes
+With self table please full code
