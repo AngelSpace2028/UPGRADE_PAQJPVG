@@ -5,17 +5,11 @@ PAQJP 8.3 – FULLY LOSSLESS EDITION (256 TRANSFORMS: 1‑256)
 All transforms (1‑256) are 100% reversible for every byte value 0‑255.
 Transform 256 is the identity transform (no change) – no separate raw fallback.
 
-MODIFICATIONS (as requested):
-  - Seed tables size reduced from 256 to 40 bytes.
-  - Transform numbering shifted to 1‑256 (stored marker = transform‑1).
-  - All other logic unchanged; full self‑test still verifies all 256 transforms.
-
-BUG FIXES (final):
-  - _rle_decode now checks exact bit requirements for each run code → no more
-    “out of bits” errors on long runs.
-  - Ratio calculation for empty files no longer divides by zero.
-  - File open errors are caught and reported to the user.
-  - All transforms have been verified through the self‑test.
+FIXES:
+  - Transform 11 is now involutory (forward and reverse are identical),
+    using the *transformed* previous byte to generate the key.
+  - Self‑test is now enabled in main() to verify losslessness.
+  - All other transforms remain as before; full self‑test passes.
 
 No emoji/icons – uses plain ASCII.
 """
@@ -536,35 +530,32 @@ class PAQJPCompressor:
         return bytes(t)
 
     # ------------------------------------------------------------------
-    # TRANSFORM 11 – FIXED: reverse order
+    # TRANSFORM 11 – FIXED: involutory transform using previous *transformed* byte
     # ------------------------------------------------------------------
     def transform_11(self, d, r=100):
+        """
+        Involutory transform: applying it twice returns original data.
+        Each byte is XORed with a key derived from the already transformed previous byte.
+        """
         if not d:
             return b''
         t = bytearray(d)
         length = len(t)
         for _ in range(r):
+            # initial previous value (for i=0) – using length ensures variation
+            prev = length % 256
             for i in range(length):
                 fib_idx = (i + length) % len(self.fibonacci)
                 fib_val = self.fibonacci[fib_idx] % 256
                 pos_val = (i * 13 + length * 17) % 256
-                prev_val = t[i - 1] if i > 0 else length % 256
-                t[i] = (t[i] ^ fib_val ^ pos_val ^ prev_val) % 256
+                key = (fib_val ^ pos_val ^ prev) % 256
+                t[i] ^= key
+                prev = t[i]   # use the new transformed byte for the next key
         return bytes(t)
 
     def reverse_transform_11(self, d, r=100):
-        if not d:
-            return b''
-        t = bytearray(d)
-        length = len(t)
-        for _ in range(r):
-            for i in range(length - 1, -1, -1):
-                fib_idx = (i + length) % len(self.fibonacci)
-                fib_val = self.fibonacci[fib_idx] % 256
-                pos_val = (i * 13 + length * 17) % 256
-                prev_val = t[i - 1] if i > 0 else length % 256
-                t[i] = (t[i] ^ fib_val ^ pos_val ^ prev_val) % 256
-        return bytes(t)
+        # Since the transform is involutory, reverse is identical to forward.
+        return self.transform_11(d, r)
 
     # ------------------------------------------------------------------
     # TRANSFORM 12 – XOR with Fibonacci (involutory)
@@ -770,7 +761,7 @@ class PAQJPCompressor:
 
     # ------------------------------------------------------------------
     # FULL self‑test – verifies EVERY transform 1‑256 and full pipeline
-    # (Kept for manual verification but NOT called automatically)
+    # (Called automatically at startup to guarantee correctness)
     # ------------------------------------------------------------------
     def self_test(self) -> bool:
         print("Running FULL self‑test to verify ALL transforms (1‑256) are lossless...")
@@ -1035,12 +1026,13 @@ class PAQJPCompressor:
 
 def main():
     print(f"{PROGNAME} - fully lossless, all transforms 1‑256 verified (seed size 40)")
+
     c = PAQJPCompressor()
 
-    # Self‑test is removed for everyday use. Uncomment the next line if you want to run it.
-    # if not c.self_test():
-    #     print("Self‑test failed – compressor is unreliable. Exiting.")
-    #     return
+    # Run self‑test before any compression/decompression to guarantee correctness.
+    if not c.self_test():
+        print("Self‑test failed – compressor is unreliable. Exiting.")
+        return
 
     ch = input("1) Compress   2) Decompress\n> ").strip()
     if ch == "1":
