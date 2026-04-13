@@ -2,7 +2,7 @@ UPGRADE\_PAQJPVG Compression hybrid Software Working right without bugs and with
 
 
 
-UPGRADE\_PAQJPVG 2304 tranfomations losslessness Lossless 100% and without corrupted files (choose the best of 255 transformations and extract back) done code 12 February lossless 100%, but Explain 16 February Lossless 100% 2026 count 256^256 variations Speed compress 170 bytes-1.3KB/s extract 500KB/s 80-97% pro-cents compress
+UPGRADE\_PAQJPVG 2304 tranfomations losslessness Lossless 100% and without corrupted files (choose the best of 255 transformations and extract back) done code 12 February lossless 100%, but Explain 16 February Lossless 100% 2026 count 10^252000000 of 100 MB variations Speed compress 170 bytes-1.3KB/s extract 500KB/s 80-97% pro-cents compress
 
 
 
