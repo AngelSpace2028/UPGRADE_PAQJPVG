@@ -1,10 +1,15 @@
 UPGRADE\_PAQJPVG Compression hybrid Software Working right without bugs and without Errors
 
-PAQJP_8.2,3,4,5
+PAQJP_8.2,3,4, 5
+
 Python 3.7.4
+
 pip install zstandard  
+
 pip install mpmath
+
 pip install cython
+
 pip install paq
 
 App PAQJPVG_8.5-1 Replit Engine by Jurijus Pacalovas
