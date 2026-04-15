@@ -12,7 +12,7 @@ pip install cython
 
 pip install paq
 
-App PAQJPVG_8.5 Replit Engine by Jurijus
+App PAQJPVG_8.5-4 Replit Engine by Jurijus
 
 https://6d12ff49-574e-490c-a27e-ce0b42018552-00-2nsbwpijno5md.kirk.replit.dev
 
