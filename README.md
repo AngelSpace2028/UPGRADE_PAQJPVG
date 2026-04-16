@@ -1,5 +1,7 @@
 UPGRADE\_PAQJPVG Compression hybrid Software Working right without bugs and without Errors
 
+PAQJPVG_8.5 Replit App by Jurijus Pacalovas
+
 PAQJP_8.2,3,4, 5,5L
 
 Python 3.7.4
