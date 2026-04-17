@@ -1,9 +1,9 @@
 UPGRADE\_PAQJPVG Compression hybrid Software Working right without bugs and without Errors
 
-PAQJPVG_8.5-4 Replit App by Jurijus Pacalovas 8.5 PAQ level 9 and zstandard level 22
+PAQJPVG_8.5-4 Replit App by Jurijus Pacalovas 8.5L-4 PAQ level 9 and zstandard level 22
 https://6d12ff49-574e-490c-a27e-ce0b42018552-00-2nsbwpijno5md.kirk.replit.dev
 
-PAQJP_8.2,3,4, 5, 5L The best paq level 10 and zstandard level 22
+PAQJP_8.2,3,4, 5, 5L The best paq level 10 and zstandard level 22 Done all 2026 year in April 17 by Jurijus Pacalovas and Vincent Geoghegan
 
 Python 3.7.4
 
