@@ -4,7 +4,7 @@
 PAQJP 8.5 - 256 Lossless Transforms + 2704 Lossless Transform-Pair Sequences
 ----------------------------------------------------------------------------
 All single transforms (1-256) and all ordered pairs are mathematically lossless.
-Every transform has a perfect inverse. Fixed the only non-reversible transform (14).
+Every transform has a perfect inverse. Fixed missing transform #16.
 
 Usage:
     python paqjp.py
@@ -20,6 +20,7 @@ import os
 import math
 import random
 import sys
+import decimal
 from typing import Optional, List, Tuple, Dict, Callable
 
 # ------------------------------------------------------------
@@ -74,7 +75,7 @@ class PAQJPCompressor:
         # Build all 256 transforms
         self._build_transform_maps()
 
-        # Build pair sequences (extended base: 1..48 plus new 18..21)
+        # Build pair sequences (base 1..52 → 2704 pairs)
         self.sequences = self._build_pair_sequences()
 
     # ------------------------------------------------------------------
@@ -91,7 +92,6 @@ class PAQJPCompressor:
         true_digits = self.get_pi_digits(n)
         true_scaled = int(self.PI_STR.replace('.', '')[:n+1])
         DENOM = 16777216
-        import decimal
         decimal.getcontext().prec = 50
         pi_dec = decimal.Decimal(self.PI_STR)
         k_float = (pi_dec - 3) * DENOM
@@ -135,7 +135,6 @@ class PAQJPCompressor:
     # New constant helpers
     # ------------------------------------------------------------------
     def get_basel_digits(self, n: int) -> str:
-        import decimal
         decimal.getcontext().prec = n + 5
         pi = decimal.Decimal(self.PI_STR)
         basel = (pi * pi) / decimal.Decimal(6)
@@ -143,7 +142,6 @@ class PAQJPCompressor:
         return s[:n]
 
     def get_one_over_e_digits(self, n: int) -> str:
-        import decimal
         decimal.getcontext().prec = n + 5
         e = decimal.Decimal(1).exp()
         inv_e = decimal.Decimal(1) / e
@@ -151,7 +149,6 @@ class PAQJPCompressor:
         return s[:n]
 
     def get_5e_digits(self, n: int) -> str:
-        import decimal
         decimal.getcontext().prec = n + 5
         e = decimal.Decimal(1).exp()
         five_e = decimal.Decimal(5) * e
@@ -351,14 +348,13 @@ class PAQJPCompressor:
             val = self._read_bits(bits, pos, 8)
             pos += 8
             out.extend([val] * run)
-        # check that remaining bits are zero (padding)
         for i in range(pos, nbits):
             if bits[i] != 0:
                 return None
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01-13, 15-21 (all lossless)
+    # Transforms 01-15, 17-21 (all lossless)
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
@@ -583,18 +579,17 @@ class PAQJPCompressor:
             t[i] ^= xor_value
         return bytes(t)
 
-    # === FIXED: transform_14 is now fully reversible (was broken before) ===
+    # === FIXED: transform_14 is now fully reversible (simple checksum append) ===
     def transform_14(self, d):
-        """Reversible checksum append (simple, lossless)."""
         if not d:
             return b'\x00'
         checksum = sum(d) % 256
-        return d + bytes([checksum])   # append checksum byte
+        return d + bytes([checksum])
 
     def reverse_transform_14(self, d):
         if not d:
             return b''
-        return d[:-1]   # remove checksum byte → exact original restored
+        return d[:-1]
 
     def transform_15(self, d):
         if len(d) < 1:
@@ -617,6 +612,21 @@ class PAQJPCompressor:
             if i < len(t):
                 t[i] = (t[i] - pattern_values[i % len(pattern_values)]) % 256
         return bytes(t)
+
+    # ------------------------------------------------------------------
+    # NEW TRANSFORM 16 (was missing)
+    # ------------------------------------------------------------------
+    def transform_16(self, data: bytes) -> bytes:
+        """Simple involutory XOR based on data length."""
+        if not data:
+            return b''
+        xor_byte = (len(data) * 7 + 13) % 256
+        t = bytearray(data)
+        for i in range(len(t)):
+            t[i] ^= xor_byte
+        return bytes(t)
+
+    reverse_transform_16 = transform_16
 
     # ------------------------------------------------------------------
     # NEW TRANSFORMS 18-21 (mathematical constants)
@@ -709,13 +719,13 @@ class PAQJPCompressor:
         return tf, tf
 
     # ------------------------------------------------------------------
-    # Build transform maps (1..256) - correct mapping
+    # Build transform maps (1..256) - now complete
     # ------------------------------------------------------------------
     def _build_transform_maps(self):
         self.fwd_transforms: Dict[int, Callable] = {}
         self.rev_transforms: Dict[int, Callable] = {}
 
-        # 1..16 explicit (original mapping)
+        # 1..16 explicit
         self.fwd_transforms[1] = self.transform_00
         self.rev_transforms[1] = self.reverse_transform_00
         self.fwd_transforms[2] = self.transform_01
@@ -744,14 +754,16 @@ class PAQJPCompressor:
         self.rev_transforms[13] = self.reverse_transform_12
         self.fwd_transforms[14] = self.transform_13
         self.rev_transforms[14] = self.reverse_transform_13
-        self.fwd_transforms[15] = self.transform_14   # FIXED version
+        self.fwd_transforms[15] = self.transform_14
         self.rev_transforms[15] = self.reverse_transform_14
-        self.fwd_transforms[16] = self.transform_15
-        self.rev_transforms[16] = self.reverse_transform_15
+        self.fwd_transforms[16] = self.transform_16      # ← new
+        self.rev_transforms[16] = self.reverse_transform_16
+
+        # 17 - pi transform
         self.fwd_transforms[17] = self.transform_17
         self.rev_transforms[17] = self.reverse_transform_17
 
-        # 18..21 - new mathematical constants
+        # 18..21 - mathematical constants
         self.fwd_transforms[18] = self.transform_18
         self.rev_transforms[18] = self.reverse_transform_18
         self.fwd_transforms[19] = self.transform_19
@@ -771,12 +783,16 @@ class PAQJPCompressor:
         self.fwd_transforms[256] = self.transform_256
         self.rev_transforms[256] = self.reverse_transform_256
 
+        # Safety check: all 1..256 must be present
+        for i in range(1, 257):
+            if i not in self.fwd_transforms:
+                raise RuntimeError(f"Transform {i} missing!")
+
     # ------------------------------------------------------------------
-    # Build pair sequences
+    # Build pair sequences – now exactly 2704 (52×52)
     # ------------------------------------------------------------------
     def _build_pair_sequences(self) -> List[Tuple[int, ...]]:
-        base = list(range(1, 49)) + [18, 19, 20, 21]
-        base = sorted(set(base))
+        base = list(range(1, 53))   # 1..52 → 2704 pairs
         return [(t1, t2) for t1 in base for t2 in base]
 
     # ------------------------------------------------------------------
@@ -856,7 +872,7 @@ class PAQJPCompressor:
             except Exception:
                 continue
 
-        # Pairs
+        # Pairs (2704 of them)
         for seq in self.sequences:
             try:
                 transformed = self._apply_sequence(data, seq)
@@ -899,7 +915,7 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
-        print("PAQJP 8.5 - FULL SELF-TEST (now 100% lossless)")
+        print("PAQJP 8.5 - FULL SELF-TEST (100% lossless)")
         print("=" * 60)
         all_ok = True
 
@@ -954,13 +970,22 @@ class PAQJPCompressor:
             return False
         print("  PASS: all pairs OK on all bytes")
 
-        # Random data + full pipeline tests (omitted for brevity in this response but identical to original)
-        print("\n[All tests passed - compressor is now 100% lossless]")
+        # Random data + full pipeline test (quick sanity check)
+        print("\nTesting random 1000‑byte block through full compress/decompress...")
+        rng = random.Random(12345)
+        test_data = bytes(rng.randint(0, 255) for _ in range(1000))
+        compressed = self.compress_with_best(test_data)
+        decompressed, seq = self.decompress_with_best(compressed)
+        if decompressed != test_data:
+            print("  FAIL: random data full pipeline mismatch")
+            return False
+        print("  PASS: random data pipeline OK")
 
+        print("\n[All tests passed - compressor is now 100% lossless]")
         return True
 
     # ------------------------------------------------------------------
-    # File API (unchanged)
+    # File API
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str):
         try:
