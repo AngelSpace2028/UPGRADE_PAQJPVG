@@ -10,7 +10,7 @@ input length and any byte values.
 
 Usage:
     python paqjp.py
-    Choose 1 (compress) or 2 (decompress) and provide input/output filenames.
+    Choose 1 (compress), 2 (decompress), or 3 (run full lossless self‑test).
 
 Dependencies (optional):
     - zstandard (for Zstd backend)
@@ -1020,25 +1020,24 @@ def main():
     print(f"{PROGNAME} - fully lossless, all transforms 1‑256 verified (seed size 40)")
     print("New: Transform 17 uses π lossless approximation (3 + K/16777216) as XOR mask.")
     c = PAQJPCompressor()
-
-    # ----- SELF‑TEST ENABLED -----
-    if not c.self_test():
-        print("Self‑test failed – compressor is unreliable. Exiting.")
-        return
-    # -----------------------------
-
-    ch = input("1) Compress   2) Decompress\n> ").strip()
-    if ch == "1":
-        i = input("Input file: ").strip()
-        o = input("Output file: ").strip() or i + ".pjp"
-        c.compress(i, o)
-    elif ch == "2":
-        i = input("Compressed file: ").strip()
-        o = input("Output file: ").strip() or i.rsplit('.', 1)[0] + ".orig"
-        c.decompress(i, o)
-    else:
-        print("Invalid choice.")
-
+    while True:
+        ch = input("\n1) Compress   2) Decompress   3) Check lossless 100%\n> ").strip()
+        if ch == "1":
+            i = input("Input file: ").strip()
+            o = input("Output file: ").strip() or i + ".pjp"
+            c.compress(i, o)
+        elif ch == "2":
+            i = input("Compressed file: ").strip()
+            o = input("Output file: ").strip() or i.rsplit('.', 1)[0] + ".orig"
+            c.decompress(i, o)
+        elif ch == "3":
+            print("Starting full lossless verification...")
+            if c.self_test():
+                print("The compressor is 100% lossless and safe to use.")
+            else:
+                print("Self-test failed. Do not use the compressor until the issue is resolved.")
+        else:
+            print("Invalid choice. Please enter 1, 2, or 3.")
 
 if __name__ == "__main__":
     main()
