@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 8.6 - 256 Lossless Transforms + 2704 Transform-Pair Sequences
+PAQJP 8.6 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 ----------------------------------------------------------------------------
-All single transforms (1-256), all ordered pairs (2704), and the raw (no-transform)
+All single transforms (1‑256), all ordered pairs (2704), and the raw (no‑transform)
 path are mathematically lossless.  Every transform has a perfect inverse.
 
-HEADER FORMAT (variable-length):
+HEADER FORMAT (variable‑length):
    Byte 0:  F
      F < 252             → single transform number = F+1  (1..252)
      F == 252            → raw (no transform)
-     F == 253            → pair: next 2 bytes encode pair-index big-endian
+     F == 253            → pair: next 2 bytes encode pair‑index big‑endian
      F == 254            → extended single: next byte X → transform = 253+X (0..3)
      F == 255            → RESERVED (unused)
 
 Usage:
     python paqjp86.py
-    Choose 1 (compress), 2 (decompress), or 3 (full self-test).
+    Choose 1 (compress), 2 (decompress), or 3 (full self‑test).
 
 Dependencies (optional):
     - zstandard (for Zstd backend, level 22)
     - paq (for PAQ backend)
-If neither is available, data is stored raw - still lossless.
+If neither is available, data is stored raw – still lossless.
 """
 
 import os
@@ -41,6 +41,7 @@ except ImportError:
 
 try:
     import zstandard as zstd
+
     zstd_cctx = zstd.ZstdCompressor(level=22)
     zstd_dctx = zstd.ZstdDecompressor()
     HAS_ZSTD = True
@@ -52,7 +53,7 @@ PROGNAME = "PAQJP_8.6_LOSSLESS_VARIABLE_HEADER"
 # ------------------------------------------------------------
 # Constants
 # ------------------------------------------------------------
-PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p**0.5)+1))]
+PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))]
 PI_DIGITS = [79, 17, 111]
 
 # ------------------------------------------------------------
@@ -62,9 +63,9 @@ def find_nearest_prime_around(n: int) -> int:
     o = 0
     while True:
         c1, c2 = n - o, n + o
-        if c1 >= 2 and all(c1 % d != 0 for d in range(2, int(c1**0.5)+1)):
+        if c1 >= 2 and all(c1 % d != 0 for d in range(2, int(c1 ** 0.5) + 1)):
             return c1
-        if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2**0.5)+1)):
+        if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2 ** 0.5) + 1)):
             return c2
         o += 1
 
@@ -94,20 +95,20 @@ class PAQJPCompressor:
     def get_pi_digits(self, n: int) -> str:
         if n < 1:
             return ""
-        return self.PI_STR[2:2+n]
+        return self.PI_STR[2:2 + n]
 
     def find_lossless_k(self, n: int):
         if n < 1:
             return 0, True
         true_digits = self.get_pi_digits(n)
-        true_scaled = int(self.PI_STR.replace('.', '')[:n+1])
+        true_scaled = int(self.PI_STR.replace('.', '')[:n + 1])
         DENOM = 16777216
         decimal.getcontext().prec = 50
         pi_dec = decimal.Decimal(self.PI_STR)
         k_float = (pi_dec - 3) * DENOM
         k_candidate = int(round(k_float))
         k_candidate = max(0, min(k_candidate, DENOM - 1))
-        approx_scaled = (3 * 10**n * DENOM + k_candidate * 10**n) // DENOM
+        approx_scaled = (3 * 10 ** n * DENOM + k_candidate * 10 ** n) // DENOM
         return k_candidate, approx_scaled == true_scaled
 
     def to_bin(self, value: int, bits: int) -> str:
@@ -117,7 +118,7 @@ class PAQJPCompressor:
         return 23 if k <= 0x7FFFFF else 25
 
     # ------------------------------------------------------------------
-    # Transform 17 - pi-based XOR mask (lossless)
+    # Transform 17 – pi‑based XOR mask (lossless)
     # ------------------------------------------------------------------
     def transform_17(self, data: bytes) -> bytes:
         if not data:
@@ -127,7 +128,7 @@ class PAQJPCompressor:
         bit_str = self.to_bin(k, bits_used)
         mask_bytes = []
         for i in range(0, len(bit_str), 8):
-            byte_bits = bit_str[i:i+8]
+            byte_bits = bit_str[i:i + 8]
             if len(byte_bits) < 8:
                 byte_bits = byte_bits.ljust(8, '0')
             mask_bytes.append(int(byte_bits, 2))
@@ -142,7 +143,7 @@ class PAQJPCompressor:
         return self.transform_17(data)
 
     # ------------------------------------------------------------------
-    # New constant helpers (used in transforms 18-20)
+    # New constant helpers (used in transforms 18‑20)
     # ------------------------------------------------------------------
     def get_basel_digits(self, n: int) -> str:
         decimal.getcontext().prec = n + 5
@@ -201,7 +202,7 @@ class PAQJPCompressor:
         return val
 
     # ------------------------------------------------------------------
-    # TRANSFORM 00 - multi-pass shift + compact RLE (lossless)
+    # TRANSFORM 00 – multi‑pass shift + compact RLE (lossless)
     # ------------------------------------------------------------------
     def transform_00(self, data: bytes) -> bytes:
         if not data:
@@ -364,7 +365,7 @@ class PAQJPCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01-15, 17-21 (all lossless)
+    # Transforms 01‑15 (all lossless)
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
@@ -375,6 +376,7 @@ class PAQJPCompressor:
                     if i < len(t):
                         t[i] ^= xor_val
         return bytes(t)
+
     reverse_transform_01 = transform_01
 
     def transform_02(self, d):
@@ -480,6 +482,7 @@ class PAQJPCompressor:
             for i in range(len(t)):
                 t[i] ^= pi_rot[i % len(pi_rot)]
         return bytes(t)
+
     reverse_transform_07 = transform_07
 
     def transform_08(self, d, r=100):
@@ -493,6 +496,7 @@ class PAQJPCompressor:
             for i in range(len(t)):
                 t[i] ^= pi_rot[i % len(pi_rot)]
         return bytes(t)
+
     reverse_transform_08 = transform_08
 
     def transform_09(self, d, r=100):
@@ -507,6 +511,7 @@ class PAQJPCompressor:
             for i in range(len(t)):
                 t[i] ^= pi_rot[i % len(pi_rot)] ^ (i % 256)
         return bytes(t)
+
     reverse_transform_09 = transform_09
 
     def transform_10(self, d, r=100):
@@ -541,6 +546,7 @@ class PAQJPCompressor:
                 key = (fib_val ^ pos_val) % 256
                 t[i] ^= key
         return bytes(t)
+
     reverse_transform_11 = transform_11
 
     def transform_12(self, d, r=100):
@@ -549,6 +555,7 @@ class PAQJPCompressor:
             for i in range(len(t)):
                 t[i] ^= self.fibonacci[i % len(self.fibonacci)] % 256
         return bytes(t)
+
     reverse_transform_12 = transform_12
 
     def transform_13(self, d):
@@ -589,7 +596,7 @@ class PAQJPCompressor:
             t[i] ^= xor_value
         return bytes(t)
 
-    # FIXED: transform_14 is now fully reversible (simple checksum append)
+    # transform_14 – simple checksum append (lossless, trivial inverse)
     def transform_14(self, d):
         if not d:
             return b'\x00'
@@ -601,6 +608,7 @@ class PAQJPCompressor:
             return b''
         return d[:-1]
 
+    # transform_15 – pattern addition on every third byte
     def transform_15(self, d):
         if len(d) < 1:
             return b''
@@ -623,9 +631,8 @@ class PAQJPCompressor:
                 t[i] = (t[i] - pattern_values[i % len(pattern_values)]) % 256
         return bytes(t)
 
-    # NEW TRANSFORM 16 (was missing in older versions)
+    # transform_16 – simple involutory XOR based on data length
     def transform_16(self, data: bytes) -> bytes:
-        """Simple involutory XOR based on data length."""
         if not data:
             return b''
         xor_byte = (len(data) * 7 + 13) % 256
@@ -633,40 +640,51 @@ class PAQJPCompressor:
         for i in range(len(t)):
             t[i] ^= xor_byte
         return bytes(t)
+
     reverse_transform_16 = transform_16
 
-    # NEW TRANSFORMS 18-21 (mathematical constants)
+    # ------------------------------------------------------------------
+    # Transform 17 – pi‑based XOR mask (lossless)
+    # (already defined above, used here)
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Transforms 18‑21 – mathematical constants
+    # ------------------------------------------------------------------
     def transform_18(self, data: bytes) -> bytes:
         if not data:
             return b''
         digits = self.get_basel_digits(max(10, len(data) // 2 + 5))
-        mask = bytes(int(digits[i:i+2]) % 256 for i in range(0, len(digits), 2))
+        mask = bytes(int(digits[i:i + 2]) % 256 for i in range(0, len(digits), 2))
         t = bytearray(data)
         for i in range(len(t)):
             t[i] ^= mask[i % len(mask)]
         return bytes(t)
+
     reverse_transform_18 = transform_18
 
     def transform_19(self, data: bytes) -> bytes:
         if not data:
             return b''
         digits = self.get_one_over_e_digits(max(10, len(data) // 2 + 5))
-        mask = bytes(int(digits[i:i+2]) % 256 for i in range(0, len(digits), 2))
+        mask = bytes(int(digits[i:i + 2]) % 256 for i in range(0, len(digits), 2))
         t = bytearray(data)
         for i in range(len(t)):
             t[i] ^= mask[i % len(mask)]
         return bytes(t)
+
     reverse_transform_19 = transform_19
 
     def transform_20(self, data: bytes) -> bytes:
         if not data:
             return b''
         digits = self.get_5e_digits(max(10, len(data) // 2 + 5))
-        mask = bytes(int(digits[i:i+2]) % 256 for i in range(0, len(digits), 2))
+        mask = bytes(int(digits[i:i + 2]) % 256 for i in range(0, len(digits), 2))
         t = bytearray(data)
         for i in range(len(t)):
             t[i] ^= mask[i % len(mask)]
         return bytes(t)
+
     reverse_transform_20 = transform_20
 
     def transform_21(self, data: bytes) -> bytes:
@@ -692,6 +710,7 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     def transform_256(self, d: bytes) -> bytes:
         return d
+
     reverse_transform_256 = transform_256
 
     # ------------------------------------------------------------------
@@ -710,7 +729,7 @@ class PAQJPCompressor:
         return max(1, min(256, repeats))
 
     # ------------------------------------------------------------------
-    # Dynamic transforms 22-255 - XOR with seed (involutory)
+    # Dynamic transforms 23‑255 – XOR with seed (involutory)
     # ------------------------------------------------------------------
     def _dynamic_transform(self, n: int):
         def tf(data: bytes):
@@ -721,16 +740,17 @@ class PAQJPCompressor:
             for i in range(len(t)):
                 t[i] ^= seed
             return bytes(t)
+
         return tf, tf
 
     # ------------------------------------------------------------------
-    # Build transform maps (1..256)
+    # Build transform maps (1..256) – CORRECTED MAPPING
     # ------------------------------------------------------------------
     def _build_transform_maps(self):
         self.fwd_transforms: Dict[int, Callable] = {}
         self.rev_transforms: Dict[int, Callable] = {}
 
-        # 1..16 explicit
+        # Explicit transforms 1‑22 (using all defined methods)
         self.fwd_transforms[1] = self.transform_00
         self.rev_transforms[1] = self.reverse_transform_00
         self.fwd_transforms[2] = self.transform_01
@@ -761,34 +781,32 @@ class PAQJPCompressor:
         self.rev_transforms[14] = self.reverse_transform_13
         self.fwd_transforms[15] = self.transform_14
         self.rev_transforms[15] = self.reverse_transform_14
-        self.fwd_transforms[16] = self.transform_16
-        self.rev_transforms[16] = self.reverse_transform_16
+        self.fwd_transforms[16] = self.transform_15
+        self.rev_transforms[16] = self.reverse_transform_15
+        self.fwd_transforms[17] = self.transform_16
+        self.rev_transforms[17] = self.reverse_transform_16
+        self.fwd_transforms[18] = self.transform_17
+        self.rev_transforms[18] = self.reverse_transform_17
+        self.fwd_transforms[19] = self.transform_18
+        self.rev_transforms[19] = self.reverse_transform_18
+        self.fwd_transforms[20] = self.transform_19
+        self.rev_transforms[20] = self.reverse_transform_19
+        self.fwd_transforms[21] = self.transform_20
+        self.rev_transforms[21] = self.reverse_transform_20
+        self.fwd_transforms[22] = self.transform_21
+        self.rev_transforms[22] = self.reverse_transform_21
 
-        # 17 - pi transform
-        self.fwd_transforms[17] = self.transform_17
-        self.rev_transforms[17] = self.reverse_transform_17
-
-        # 18..21 - mathematical constants
-        self.fwd_transforms[18] = self.transform_18
-        self.rev_transforms[18] = self.reverse_transform_18
-        self.fwd_transforms[19] = self.transform_19
-        self.rev_transforms[19] = self.reverse_transform_19
-        self.fwd_transforms[20] = self.transform_20
-        self.rev_transforms[20] = self.reverse_transform_20
-        self.fwd_transforms[21] = self.transform_21
-        self.rev_transforms[21] = self.reverse_transform_21
-
-        # 22..255 dynamic
-        for i in range(22, 256):
+        # Dynamic transforms 23‑255 (233 transforms)
+        for i in range(23, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
 
-        # 256 identity
+        # Identity transform 256
         self.fwd_transforms[256] = self.transform_256
         self.rev_transforms[256] = self.reverse_transform_256
 
-        # Safety check: all 1..256 must be present
+        # Safety check
         for i in range(1, 257):
             if i not in self.fwd_transforms:
                 raise RuntimeError(f"Transform {i} missing!")
@@ -797,7 +815,7 @@ class PAQJPCompressor:
     # Build pair sequences – exactly 2704 (52×52)
     # ------------------------------------------------------------------
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
-        base = list(range(1, 53))   # 1..52 → 2704 pairs
+        base = list(range(1, 53))  # 1..52 → 2704 pairs
         return [(t1, t2) for t1 in base for t2 in base]
 
     # ------------------------------------------------------------------
@@ -855,7 +873,7 @@ class PAQJPCompressor:
         return None
 
     # ------------------------------------------------------------------
-    # ENCODING / DECODING of the variable-length header
+    # ENCODING / DECODING of the variable‑length header
     # ------------------------------------------------------------------
     def _encode_marker_single(self, t: int) -> bytes:
         """Return header bytes for a single transform 1..256."""
@@ -870,15 +888,9 @@ class PAQJPCompressor:
     def _encode_marker_pair(self, t1: int, t2: int) -> bytes:
         """Both t1 and t2 must be in 1..52.  Index = (t1-1)*52 + (t2-1)."""
         idx = (t1 - 1) * 52 + (t2 - 1)
-        # 2 bytes, big-endian
         return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
 
     def _decode_header(self, data: bytes):
-        """
-        Parse the header.  Returns (offset, seq) where:
-            offset: number of header bytes consumed
-            seq: tuple of transform numbers (empty for raw)
-        """
         if len(data) < 1:
             return 0, ()
         f = data[0]
@@ -888,10 +900,10 @@ class PAQJPCompressor:
             return 1, ()
         elif f == 253:
             if len(data) < 3:
-                return 0, ()  # incomplete
+                return 0, ()
             idx = (data[1] << 8) | data[2]
             if idx >= len(self.sequences):
-                return 0, ()  # invalid index
+                return 0, ()
             t1, t2 = self.pair_lookup[idx]
             return 3, (t1, t2)
         elif f == 254:
@@ -899,7 +911,7 @@ class PAQJPCompressor:
                 return 0, ()
             x = data[1]
             if x > 3:
-                return 0, ()  # invalid
+                return 0, ()
             return 2, (253 + x,)
         else:  # 255 reserved
             return 0, ()
@@ -908,12 +920,7 @@ class PAQJPCompressor:
     # Main compression / decompression (with variable header)
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes) -> bytes:
-        """
-        Try raw, every single transform, every pair.
-        Return the smallest complete representation: header + backend_compressed.
-        """
         if not data:
-            # For empty input, raw is always smallest.
             backend = self._compress_backend(b'')
             return self._encode_marker_raw() + backend
 
@@ -954,10 +961,6 @@ class PAQJPCompressor:
         return best_bytes
 
     def decompress_with_best(self, data: bytes):
-        """
-        Returns (original_bytes, seq) where seq is the tuple of transforms used
-        (empty for raw).  Returns (b'', None) on error.
-        """
         offset, seq = self._decode_header(data)
         if offset == 0:
             return b'', None
@@ -966,7 +969,7 @@ class PAQJPCompressor:
         if backend is None:
             return b'', None
         try:
-            if not seq:  # raw
+            if not seq:
                 result = backend
             else:
                 result = self._reverse_sequence(backend, seq)
@@ -975,11 +978,11 @@ class PAQJPCompressor:
         return result, seq
 
     # ------------------------------------------------------------------
-    # EXHAUSTIVE SELF-TEST
+    # EXHAUSTIVE SELF‑TEST
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
-        print("PAQJP 8.6 - FULL SELF-TEST (100% lossless)")
+        print("PAQJP 8.6 – FULL SELF‑TEST (100% lossless)")
         print("=" * 60)
         all_ok = True
 
@@ -1006,7 +1009,7 @@ class PAQJPCompressor:
                 break
 
         if not all_ok:
-            print("\n[FAIL] Single-transform test failed.")
+            print("\n[FAIL] Single‑transform test failed.")
             return False
 
         # Pairs on every byte
@@ -1028,7 +1031,7 @@ class PAQJPCompressor:
             if not all_ok:
                 break
             if (idx + 1) % 256 == 0:
-                print(f"  PASS: {idx+1} pairs tested on all bytes")
+                print(f"  PASS: {idx + 1} pairs tested on all bytes")
         if not all_ok:
             print("\n[FAIL] Pair test failed.")
             return False
@@ -1054,7 +1057,7 @@ class PAQJPCompressor:
             return False
         print("  PASS: empty input pipeline OK")
 
-        print("\n[All tests passed - compressor is 100% lossless]")
+        print("\n[All tests passed – compressor is 100% lossless]")
         return True
 
     # ------------------------------------------------------------------
@@ -1107,13 +1110,13 @@ class PAQJPCompressor:
 # ------------------------------------------------------------
 def main():
     print(f"{PROGNAME}")
-    print("256 single transforms + 2704 transform-pair sequences (100% lossless).")
+    print("256 single transforms + 2704 transform‑pair sequences (100% lossless).")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Data will be stored raw.")
 
     c = PAQJPCompressor()
 
-    choice = input("\n1) Compress   2) Decompress   3) Full self-test\n> ").strip()
+    choice = input("\n1) Compress   2) Decompress   3) Full self‑test\n> ").strip()
     if choice == "1":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
