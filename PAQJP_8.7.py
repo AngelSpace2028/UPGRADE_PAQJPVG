@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 8.7 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
-(Engine‑marker removal variant – saves 1 byte for Zstd backend)
+PAQJP 8.8 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
+(Marker‑free backends – 1 byte saved for both Zstd and PAQ)
 ----------------------------------------------------------------------------
 All single transforms (1‑256), all ordered pairs (2704), and the raw (no‑transform)
 path are mathematically lossless.  Every transform has a perfect inverse.
@@ -15,13 +15,18 @@ HEADER FORMAT (variable‑length):
      F == 254            → extended single: next byte X → transform = 253+X (0..3)
      F == 255            → RESERVED (unused)
 
-BACKEND COMPRESSION (modified from 8.6):
-   zstd output  : originally b'Z' + data  →  now just data (saves 1 byte)
-   paq  output  : originally b'L' + data  →  now b'\x00' + data (marker byte zero)
-   raw  output  : unchanged (b'N' + data)
+BACKEND COMPRESSION (modified from 8.7):
+   zstd output  : just the raw zstd stream (no marker) → saves 1 byte
+   paq  output  : just the raw paq stream (no marker)  → saves 1 byte
+   raw  output  : unchanged (b'N' + data)                → unambiguous detection
+
+Decompression heuristics:
+   - First byte == 0x4E ('N') → raw (payload is original data)
+   - Otherwise → try zstd, then paq. The chance of cross‑detection is
+     negligible (zstd & paq streams have different internal structures).
 
 Usage:
-    python paqjp87.py
+    python paqjp88.py
     Choose 1 (compress), 2 (decompress), or 3 (full self‑test).
 """
 
@@ -49,7 +54,7 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
-PROGNAME = "PAQJP_8.7_LOSSLESS_VARIABLE_HEADER"
+PROGNAME = "PAQJP_8.8_LOSSLESS_VARIABLE_HEADER"
 
 # ------------------------------------------------------------
 # Constants
@@ -740,13 +745,12 @@ class PAQJPCompressor:
         return tf, tf
 
     # ------------------------------------------------------------------
-    # Build transform maps (1..256) – CORRECTED MAPPING
+    # Build transform maps (1..256)
     # ------------------------------------------------------------------
     def _build_transform_maps(self):
         self.fwd_transforms: Dict[int, Callable] = {}
         self.rev_transforms: Dict[int, Callable] = {}
 
-        # Explicit transforms 1‑22 (using all defined methods)
         self.fwd_transforms[1] = self.transform_00
         self.rev_transforms[1] = self.reverse_transform_00
         self.fwd_transforms[2] = self.transform_01
@@ -792,17 +796,14 @@ class PAQJPCompressor:
         self.fwd_transforms[22] = self.transform_21
         self.rev_transforms[22] = self.reverse_transform_21
 
-        # Dynamic transforms 23‑255 (233 transforms)
         for i in range(23, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
 
-        # Identity transform 256
         self.fwd_transforms[256] = self.transform_256
         self.rev_transforms[256] = self.reverse_transform_256
 
-        # Safety check
         for i in range(1, 257):
             if i not in self.fwd_transforms:
                 raise RuntimeError(f"Transform {i} missing!")
@@ -830,32 +831,29 @@ class PAQJPCompressor:
         return result
 
     # ------------------------------------------------------------------
-    # Compression backends (engine‑marker removal – saves 1 byte for Zstd)
+    # Compression backends (marker‑free for Zstd & PAQ)
     # ------------------------------------------------------------------
     def _compress_backend(self, data: bytes) -> bytes:
         candidates = []
-        
+
         if paq is not None:
             try:
-                compressed = paq.compress(data)
-                # Replace leading 'L' (0x4C) with 0x00
-                candidates.append((b'L', b'\x00' + compressed))
+                # No marker at all – just the raw PAQ stream
+                candidates.append((b'L', paq.compress(data)))
             except:
                 pass
         if HAS_ZSTD:
             try:
-                compressed = zstd_cctx.compress(data)
-                # Drop the leading 'Z' (0x5A) entirely → saves 1 byte
-                candidates.append((b'Z', compressed))
+                # No marker – raw Zstd stream
+                candidates.append((b'Z', zstd_cctx.compress(data)))
             except:
                 pass
-        # raw: keep 'N' unchanged
+        # Raw always keeps the 'N' marker for unambiguous identification
         candidates.append((b'N', b'N' + data))
-        
+
         if not candidates:
-            # fallback
             return b'N' + data
-        
+
         winner_id, winner_data = min(candidates, key=lambda x: len(x[1]))
         return winner_data
 
@@ -863,35 +861,32 @@ class PAQJPCompressor:
         if len(data) == 0:
             return None
 
-        # Heuristic detection:
-        # 0x00 → PAQ (we stored \x00 + paq_data)
-        if data[0] == 0x00:
-            if paq is None:
-                return None
-            # Re‑insert 'L' for paq.decompress
-            try:
-                return paq.decompress(b'L' + data[1:])
-            except:
-                return None
+        # 1. Raw marker check
+        if data[0] == ord('N'):
+            return data[1:]
 
-        # Try Zstd directly (data is pure zstd stream, no marker)
+        # 2. Try Zstd (no marker)
         if HAS_ZSTD:
             try:
                 return zstd_dctx.decompress(data)
             except:
                 pass
 
-        # Fallback: maybe it's raw with 'N' marker
-        if data[0] == ord('N'):
-            return data[1:]
+        # 3. Try PAQ (no marker)
+        if paq is not None:
+            try:
+                # Note: paq.decompress expects data without any extra marker
+                return paq.decompress(data)
+            except:
+                pass
 
+        # If nothing works, fail
         return None
 
     # ------------------------------------------------------------------
-    # ENCODING / DECODING of the variable‑length header
+    # Variable‑length header encoding / decoding
     # ------------------------------------------------------------------
     def _encode_marker_single(self, t: int) -> bytes:
-        """Return header bytes for a single transform 1..256."""
         if t <= 252:
             return bytes([t - 1])
         else:
@@ -901,7 +896,6 @@ class PAQJPCompressor:
         return bytes([252])
 
     def _encode_marker_pair(self, t1: int, t2: int) -> bytes:
-        """Both t1 and t2 must be in 1..52.  Index = (t1-1)*52 + (t2-1)."""
         idx = (t1 - 1) * 52 + (t2 - 1)
         return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
 
@@ -928,11 +922,11 @@ class PAQJPCompressor:
             if x > 3:
                 return 0, ()
             return 2, (253 + x,)
-        else:  # 255 reserved
+        else:
             return 0, ()
 
     # ------------------------------------------------------------------
-    # Main compression / decompression (with variable header)
+    # Main compression / decompression
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes) -> bytes:
         if not data:
@@ -949,7 +943,7 @@ class PAQJPCompressor:
             best_total = len(candidate)
             best_bytes = candidate
 
-        # Singles 1..256
+        # Singles
         for t in range(1, 257):
             try:
                 transformed = self.fwd_transforms[t](data)
@@ -958,10 +952,10 @@ class PAQJPCompressor:
                 if len(candidate) < best_total:
                     best_total = len(candidate)
                     best_bytes = candidate
-            except Exception:
+            except:
                 continue
 
-        # Pairs (2704)
+        # Pairs
         for t1, t2 in self.sequences:
             try:
                 transformed = self._apply_sequence(data, (t1, t2))
@@ -970,7 +964,7 @@ class PAQJPCompressor:
                 if len(candidate) < best_total:
                     best_total = len(candidate)
                     best_bytes = candidate
-            except Exception:
+            except:
                 continue
 
         return best_bytes
@@ -988,20 +982,20 @@ class PAQJPCompressor:
                 result = backend
             else:
                 result = self._reverse_sequence(backend, seq)
-        except Exception:
+        except:
             return b'', None
         return result, seq
 
     # ------------------------------------------------------------------
-    # EXHAUSTIVE SELF‑TEST
+    # Exhaustive self‑test
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
-        print("PAQJP 8.7 – FULL SELF‑TEST (100% lossless)")
+        print("PAQJP 8.8 – FULL SELF‑TEST (100% lossless)")
         print("=" * 60)
         all_ok = True
 
-        # Single transforms on every byte
+        # Single transforms on all bytes
         print("Testing all 256 single transforms on all 256 byte values...")
         for t_num in range(1, 257):
             for b in range(256):
@@ -1027,7 +1021,7 @@ class PAQJPCompressor:
             print("\n[FAIL] Single‑transform test failed.")
             return False
 
-        # Pairs on every byte
+        # Pairs on all bytes
         print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
         for idx, seq in enumerate(self.sequences):
             for b in range(256):
@@ -1052,7 +1046,7 @@ class PAQJPCompressor:
             return False
         print("  PASS: all pairs OK on all bytes")
 
-        # Random data + full pipeline test
+        # Random data full pipeline
         print("\nTesting random 1000‑byte block through full compress/decompress...")
         rng = random.Random(12345)
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
@@ -1063,7 +1057,7 @@ class PAQJPCompressor:
             return False
         print(f"  PASS: random data pipeline OK (used {'raw' if not seq else 'pair' if len(seq)==2 else 'single'})")
 
-        # Empty input test
+        # Empty input
         print("\nTesting empty input...")
         compressed_empty = self.compress_with_best(b'')
         decomp_empty, sempty = self.decompress_with_best(compressed_empty)
