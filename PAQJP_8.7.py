@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 8.8 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
+PAQJP 8.7 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 (Marker‑free backends – 1 byte saved for both Zstd and PAQ)
 ----------------------------------------------------------------------------
 All single transforms (1‑256), all ordered pairs (2704), and the raw (no‑transform)
@@ -54,7 +54,7 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
-PROGNAME = "PAQJP_8.8_LOSSLESS_VARIABLE_HEADER"
+PROGNAME = "PAQJP_8.7_LOSSLESS_VARIABLE_HEADER"
 
 # ------------------------------------------------------------
 # Constants
