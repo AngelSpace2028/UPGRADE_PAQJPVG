@@ -371,7 +371,7 @@ class PAQJPCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01‑15 (all lossless)
+    # Transforms 01‑09 (all lossless)
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
@@ -520,50 +520,57 @@ class PAQJPCompressor:
 
     reverse_transform_09 = transform_09
 
-    def transform_10(self, d, r=100):
-        cnt = sum(1 for i in range(len(d) - 1) if d[i:i + 2] == b'X1')
+    # ------------------------------------------------------------------
+    # Transforms 10, 11, 12 (CORRECTED – single XOR pass instead of even r=100)
+    # ------------------------------------------------------------------
+    def transform_10(self, data: bytes) -> bytes:
+        """XOR whole data with a value derived from count of 'X1' patterns."""
+        if not data:
+            return b'\x00'
+        cnt = sum(1 for i in range(len(data) - 1) if data[i:i + 2] == b'X1')
         n = (((cnt * 2) + 1) // 3) * 3 % 256
-        t = bytearray(d)
-        for _ in range(r):
-            for i in range(len(t)):
-                t[i] ^= n
+        t = bytearray(data)
+        for i in range(len(t)):
+            t[i] ^= n
         return bytes([n]) + bytes(t)
 
-    def reverse_transform_10(self, d, r=100):
-        if len(d) < 1:
+    def reverse_transform_10(self, data: bytes) -> bytes:
+        if len(data) < 1:
             return b''
-        n = d[0]
-        t = bytearray(d[1:])
-        for _ in range(r):
-            for i in range(len(t)):
-                t[i] ^= n
+        n = data[0]
+        t = bytearray(data[1:])
+        for i in range(len(t)):
+            t[i] ^= n
         return bytes(t)
 
-    def transform_11(self, d, r=100):
-        if not d:
+    def transform_11(self, data: bytes) -> bytes:
+        """XOR with a position‑length‑Fibonacci derived key."""
+        if not data:
             return b''
-        t = bytearray(d)
+        t = bytearray(data)
         length = len(t)
-        for _ in range(r):
-            for i in range(length):
-                fib_idx = (i + length) % len(self.fibonacci)
-                fib_val = self.fibonacci[fib_idx] % 256
-                pos_val = (i * 13 + length * 17) % 256
-                key = (fib_val ^ pos_val) % 256
-                t[i] ^= key
+        for i in range(length):
+            fib_idx = (i + length) % len(self.fibonacci)
+            fib_val = self.fibonacci[fib_idx] % 256
+            pos_val = (i * 13 + length * 17) % 256
+            key = (fib_val ^ pos_val) % 256
+            t[i] ^= key
         return bytes(t)
 
-    reverse_transform_11 = transform_11
+    reverse_transform_11 = transform_11   # self‑inverse
 
-    def transform_12(self, d, r=100):
-        t = bytearray(d)
-        for _ in range(r):
-            for i in range(len(t)):
-                t[i] ^= self.fibonacci[i % len(self.fibonacci)] % 256
+    def transform_12(self, data: bytes) -> bytes:
+        """XOR each byte with a Fibonacci number (based on position)."""
+        t = bytearray(data)
+        for i in range(len(t)):
+            t[i] ^= self.fibonacci[i % len(self.fibonacci)] % 256
         return bytes(t)
 
-    reverse_transform_12 = transform_12
+    reverse_transform_12 = transform_12   # self‑inverse
 
+    # ------------------------------------------------------------------
+    # Transforms 13‑21 (unchanged, all lossless)
+    # ------------------------------------------------------------------
     def transform_13(self, d):
         if not d:
             return b''
@@ -602,7 +609,6 @@ class PAQJPCompressor:
             t[i] ^= xor_value
         return bytes(t)
 
-    # transform_14 – simple checksum append (lossless, trivial inverse)
     def transform_14(self, d):
         if not d:
             return b'\x00'
@@ -614,7 +620,6 @@ class PAQJPCompressor:
             return b''
         return d[:-1]
 
-    # transform_15 – pattern addition on every third byte
     def transform_15(self, d):
         if len(d) < 1:
             return b''
@@ -637,7 +642,6 @@ class PAQJPCompressor:
                 t[i] = (t[i] - pattern_values[i % len(pattern_values)]) % 256
         return bytes(t)
 
-    # transform_16 – simple involutory XOR based on data length
     def transform_16(self, data: bytes) -> bytes:
         if not data:
             return b''
@@ -649,9 +653,7 @@ class PAQJPCompressor:
 
     reverse_transform_16 = transform_16
 
-    # ------------------------------------------------------------------
-    # Transforms 18‑21 – mathematical constants
-    # ------------------------------------------------------------------
+    # (transform_17 already defined above)
     def transform_18(self, data: bytes) -> bytes:
         if not data:
             return b''
