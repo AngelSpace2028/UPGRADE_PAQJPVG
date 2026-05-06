@@ -1,4 +1,4 @@
-UPGRADE\_PAQJPVG Compression hybrid Software is working right without bugs and without Errors
+UPGRADE\_PAQJPVG Compression hybrid Software is working correctly without bugs and without Errors
 
 PAQJPVG_8.5-4 Replit App by Jurijus Pacalovas 8.5L-4 PAQ level 9 and zstandard level 22
 https://6d12ff49-574e-490c-a27e-ce0b42018552-00-2nsbwpijno5md.kirk.replit.dev
@@ -20,5 +20,4 @@ UPGRADE\_PAQJPVG 2704 tranfomations losslessness Lossless 100% and without corru
 
 
 Group: Jurijus Pacalovas and Vincent Geoghegan helped add 1 byte in the front markers.
-We use markers for my paq; use 1-2 bytes. 1 byte not always; for example, PAQJP_8.7, this 1-byte marker is not used and uses 00 63 00 00 or 28 B5.
-
+We use markers for my paq; use 1-2 bytes. 1 byte not always; for example,uses 1 byte uses 00 63 00 00 or 28 B5.
