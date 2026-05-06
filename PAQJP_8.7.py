@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 8.7 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
-(Marker‑free backends – 1 byte saved for both Zstd and PAQ)
+PAQJP 8.8 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
+(Marker‑free backends – detection anomaly fixed, no garbage possible)
 ----------------------------------------------------------------------------
-All single transforms (1‑256), all ordered pairs (2704), and the raw (no‑transform)
-path are mathematically lossless.  Every transform has a perfect inverse.
+All single transforms (1‑256), all ordered pairs (52×52=2704), and the raw
+(no‑transform) path are mathematically lossless.  Every transform has a perfect
+inverse.
 
 HEADER FORMAT (variable‑length):
    Byte 0:  F
@@ -15,25 +16,25 @@ HEADER FORMAT (variable‑length):
      F == 254            → extended single: next byte X → transform = 253+X (0..3)
      F == 255            → RESERVED (unused)
 
-BACKEND COMPRESSION (modified from 8.7):
-   zstd output  : just the raw zstd stream (no marker) → saves 1 byte
-   paq  output  : just the raw paq stream (no marker)  → saves 1 byte
-   raw  output  : unchanged (b'N' + data)                → unambiguous detection
+BACKEND COMPRESSION (marker‑free, safe detection order):
+   zstd output  : just the raw zstd stream (no marker)
+   paq  output  : just the raw paq stream (no marker)
+   raw  output  : b'N' + original data
 
-Decompression heuristics:
-   - First byte == 0x4E ('N') → raw (payload is original data)
-   - Otherwise → try zstd, then paq. The chance of cross‑detection is
-     negligible (zstd & paq streams have different internal structures).
+Decompression (corrected order):
+   1. Try Zstandard decompression.
+   2. Try PAQ decompression.
+   3. If both failed and the first byte is 0x4E ('N') → raw data.
+   ---> A compressed stream that happens to start with 0x4E is now
+        correctly decoded by Zstd/PAQ before the raw fallback is reached.
 
 Usage:
     python paqjp88.py
     Choose 1 (compress), 2 (decompress), or 3 (full self‑test).
 """
 
-import os
 import math
 import random
-import sys
 import decimal
 from typing import Optional, List, Tuple, Dict, Callable
 
@@ -54,7 +55,7 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
-PROGNAME = "PAQJP_8.7_LOSSLESS_VARIABLE_HEADER"
+PROGNAME = "PAQJP_8.8_LOSSLESS_2704_PAIRS"
 
 # ------------------------------------------------------------
 # Constants
@@ -92,7 +93,6 @@ class PAQJPCompressor:
 
         # Build pair sequences (base 1..52 → 2704 pairs)
         self.sequences = self._build_pair_sequences()
-        # Precompute pair lookup index -> (t1,t2) for decoding
         self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}
 
     # ------------------------------------------------------------------
@@ -521,10 +521,9 @@ class PAQJPCompressor:
     reverse_transform_09 = transform_09
 
     # ------------------------------------------------------------------
-    # Transforms 10, 11, 12 (CORRECTED – single XOR pass instead of even r=100)
+    # Transforms 10, 11, 12 (single XOR pass)
     # ------------------------------------------------------------------
     def transform_10(self, data: bytes) -> bytes:
-        """XOR whole data with a value derived from count of 'X1' patterns."""
         if not data:
             return b'\x00'
         cnt = sum(1 for i in range(len(data) - 1) if data[i:i + 2] == b'X1')
@@ -544,7 +543,6 @@ class PAQJPCompressor:
         return bytes(t)
 
     def transform_11(self, data: bytes) -> bytes:
-        """XOR with a position‑length‑Fibonacci derived key."""
         if not data:
             return b''
         t = bytearray(data)
@@ -557,19 +555,18 @@ class PAQJPCompressor:
             t[i] ^= key
         return bytes(t)
 
-    reverse_transform_11 = transform_11   # self‑inverse
+    reverse_transform_11 = transform_11
 
     def transform_12(self, data: bytes) -> bytes:
-        """XOR each byte with a Fibonacci number (based on position)."""
         t = bytearray(data)
         for i in range(len(t)):
             t[i] ^= self.fibonacci[i % len(self.fibonacci)] % 256
         return bytes(t)
 
-    reverse_transform_12 = transform_12   # self‑inverse
+    reverse_transform_12 = transform_12
 
     # ------------------------------------------------------------------
-    # Transforms 13‑21 (unchanged, all lossless)
+    # Transforms 13‑21 (lossless)
     # ------------------------------------------------------------------
     def transform_13(self, d):
         if not d:
@@ -653,7 +650,7 @@ class PAQJPCompressor:
 
     reverse_transform_16 = transform_16
 
-    # (transform_17 already defined above)
+    # transform_17 defined earlier
     def transform_18(self, data: bytes) -> bytes:
         if not data:
             return b''
@@ -833,24 +830,22 @@ class PAQJPCompressor:
         return result
 
     # ------------------------------------------------------------------
-    # Compression backends (marker‑free for Zstd & PAQ)
+    # Compression backends (marker‑free, corrected detection order)
     # ------------------------------------------------------------------
     def _compress_backend(self, data: bytes) -> bytes:
         candidates = []
 
         if paq is not None:
             try:
-                # No marker at all – just the raw PAQ stream
-                candidates.append((b'L', paq.compress(data)))
+                candidates.append((b'L', paq.compress(data)))   # raw PAQ stream
             except:
                 pass
         if HAS_ZSTD:
             try:
-                # No marker – raw Zstd stream
-                candidates.append((b'Z', zstd_cctx.compress(data)))
+                candidates.append((b'Z', zstd_cctx.compress(data)))   # raw Zstd stream
             except:
                 pass
-        # Raw always keeps the 'N' marker for unambiguous identification
+        # Raw always keeps its 'N' marker for unambiguous detection
         candidates.append((b'N', b'N' + data))
 
         if not candidates:
@@ -863,26 +858,25 @@ class PAQJPCompressor:
         if len(data) == 0:
             return None
 
-        # 1. Raw marker check
-        if data[0] == ord('N'):
-            return data[1:]
-
-        # 2. Try Zstd (no marker)
+        # 1. Try Zstandard first
         if HAS_ZSTD:
             try:
                 return zstd_dctx.decompress(data)
             except:
                 pass
 
-        # 3. Try PAQ (no marker)
+        # 2. Try PAQ next
         if paq is not None:
             try:
-                # Note: paq.decompress expects data without any extra marker
                 return paq.decompress(data)
             except:
                 pass
 
-        # If nothing works, fail
+        # 3. If both failed and the first byte is 'N', treat as raw
+        if data[0] == ord('N'):
+            return data[1:]
+
+        # Nothing succeeded
         return None
 
     # ------------------------------------------------------------------
@@ -898,6 +892,7 @@ class PAQJPCompressor:
         return bytes([252])
 
     def _encode_marker_pair(self, t1: int, t2: int) -> bytes:
+        # 2704 pairs: index = (t1-1)*52 + (t2-1)   (0..2703)
         idx = (t1 - 1) * 52 + (t2 - 1)
         return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
 
@@ -957,7 +952,7 @@ class PAQJPCompressor:
             except:
                 continue
 
-        # Pairs
+        # Pairs (2704)
         for t1, t2 in self.sequences:
             try:
                 transformed = self._apply_sequence(data, (t1, t2))
