@@ -19,5 +19,5 @@ UPGRADE\_PAQJPVG 2704 tranfomations losslessness Lossless 100% and without corru
 
 
 
-Group: Jurijus Pacalovas and Vincent Geoghegan helped add 1 byte in the front markers.
-We use markers for my paq; use 1-2 bytes. 1 byte not always; for example,uses 1 byte uses 00 63 00 00 or 28 B5.
+Group: Jurijus Pacalovas and Vincent Geoghegan helped add 1 byte to the front markers.
+We use markers for my paq: use 1-2 bytes; also use 1 byte: uses 00 63 00 00 or 28 B5.
