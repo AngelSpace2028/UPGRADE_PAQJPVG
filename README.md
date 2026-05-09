@@ -20,4 +20,4 @@ UPGRADE\_PAQJPVG Compression 2704 tranfomations losslessness Lossless 100% and w
 
 
 Group: Jurijus Pacalovas and Vincent Geoghegan helped add 1 byte to the front markers.
-We use markers for my paq: use 1-2 bytes; also use 1 byte: uses 00 63 00 00 or 28 B5.
+We use markers for my paq: use 1-2 bytes; also use 1 byte: uses 00 63 00 00 or 28 B5 2F FD
