@@ -36,6 +36,7 @@ and guarantees 100% losslessness.
 Usage:
     python paqjp88.py
     Choose 1 (compress), 2 (decompress), or 3 (full self‑test).
+    When compressing, choose Fast (256 transforms) or Ultra (256+2704 pairs).
 """
 
 import math
@@ -776,16 +777,16 @@ class PAQJPCompressor:
             return 0, ()
 
     # ------------------------------------------------------------------
-    # Main compression with auto‑correction
+    # Main compression with auto‑correction (now supports Fast/Ultra)
     # ------------------------------------------------------------------
-    def compress_with_best(self, data: bytes, safe: bool = False) -> bytes:
+    def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True) -> bytes:
         if not data:
             backend = self._compress_backend(b'', safe)
             compressed = self._encode_marker_raw() + backend
             if not safe:
                 decomp, _ = self._decompress_auto(compressed)
                 if decomp != b'':
-                    return self.compress_with_best(data, safe=True)
+                    return self.compress_with_best(data, safe=True, ultra=ultra)
             return compressed
 
         best_total = float('inf')
@@ -798,7 +799,7 @@ class PAQJPCompressor:
             best_total = len(candidate)
             best_bytes = candidate
 
-        # singles
+        # singles (always searched)
         for t in range(1, 257):
             try:
                 transformed = self.fwd_transforms[t](data)
@@ -810,24 +811,25 @@ class PAQJPCompressor:
             except:
                 continue
 
-        # pairs
-        for t1, t2 in self.sequences:
-            try:
-                transformed = self._apply_sequence(data, (t1, t2))
-                backend = self._compress_backend(transformed, safe)
-                candidate = self._encode_marker_pair(t1, t2) + backend
-                if len(candidate) < best_total:
-                    best_total = len(candidate)
-                    best_bytes = candidate
-            except:
-                continue
+        # pairs – only if ultra mode is on
+        if ultra:
+            for t1, t2 in self.sequences:
+                try:
+                    transformed = self._apply_sequence(data, (t1, t2))
+                    backend = self._compress_backend(transformed, safe)
+                    candidate = self._encode_marker_pair(t1, t2) + backend
+                    if len(candidate) < best_total:
+                        best_total = len(candidate)
+                        best_bytes = candidate
+                except:
+                    continue
 
         # verify candidate
         decomp, _ = self._decompress_auto(best_bytes)
         if decomp != data:
             if not safe:
                 print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
-                return self.compress_with_best(data, safe=True)
+                return self.compress_with_best(data, safe=True, ultra=ultra)
             else:
                 raise RuntimeError("Safe compression failed – unexpected internal error!")
         return best_bytes
@@ -853,7 +855,7 @@ class PAQJPCompressor:
         return result, seq
 
     # ------------------------------------------------------------------
-    # Exhaustive self‑test (FIXED – uses consistent decompression mode)
+    # Exhaustive self‑test (unchanged)
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
@@ -861,7 +863,6 @@ class PAQJPCompressor:
         print("=" * 60)
         all_ok = True
 
-        # 1. Single transforms on all bytes
         print("Testing all 256 single transforms on all 256 byte values...")
         for t_num in range(1, 257):
             for b in range(256):
@@ -886,7 +887,6 @@ class PAQJPCompressor:
             print("\n[FAIL] Single‑transform test failed.")
             return False
 
-        # 2. Pairs on all bytes
         print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
         for idx, seq in enumerate(self.sequences):
             for b in range(256):
@@ -911,7 +911,6 @@ class PAQJPCompressor:
             return False
         print("  PASS: all pairs OK on all bytes")
 
-        # 3. Random data full pipeline (fixed – uses same mode for decomp)
         print("\nTesting random 1000‑byte block through full compress/decompress...")
         rng = random.Random(12345)
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
@@ -941,7 +940,6 @@ class PAQJPCompressor:
 
         print("  PASS: random data pipeline OK in both modes")
 
-        # 4. Empty input
         print("\nTesting empty input...")
         for safe in [False, True]:
             compressed_empty = self.compress_with_best(b'', safe)
@@ -960,16 +958,16 @@ class PAQJPCompressor:
         return True
 
     # ------------------------------------------------------------------
-    # File API
+    # File API (with ultra flag for compress)
     # ------------------------------------------------------------------
-    def compress_file(self, infile: str, outfile: str):
+    def compress_file(self, infile: str, outfile: str, ultra: bool = True):
         try:
             with open(infile, 'rb') as f:
                 data = f.read()
         except Exception as e:
             print(f"Error reading file: {e}")
             return
-        compressed = self.compress_with_best(data)
+        compressed = self.compress_with_best(data, safe=False, ultra=ultra)
         try:
             with open(outfile, 'wb') as f:
                 f.write(compressed)
@@ -999,7 +997,7 @@ class PAQJPCompressor:
         print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
 
 # ------------------------------------------------------------
-# Main
+# Main (with Fast/Ultra choice)
 # ------------------------------------------------------------
 def main():
     print(f"{PROGNAME}")
@@ -1013,7 +1011,9 @@ def main():
     if choice == "1":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
-        c.compress_file(i, o)
+        mode = input("Choose mode:\n  1) Fast     (256 transforms)\n  2) Ultra    (256 + 2704 pairs)\n> ").strip()
+        ultra = True if mode == "2" else False
+        c.compress_file(i, o, ultra=ultra)
     elif choice == "2":
         i = input("Compressed file: ").strip()
         o = input("Output file: ").strip() or i.rsplit('.', 1)[0] + ".orig"
