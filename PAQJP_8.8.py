@@ -777,7 +777,7 @@ class PAQJPCompressor:
             return 0, ()
 
     # ------------------------------------------------------------------
-    # Main compression with auto‑correction (now supports Fast/Ultra)
+    # Main compression with auto‑correction (Fast/Ultra)
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True) -> bytes:
         if not data:
@@ -855,7 +855,7 @@ class PAQJPCompressor:
         return result, seq
 
     # ------------------------------------------------------------------
-    # Exhaustive self‑test (unchanged)
+    # Exhaustive self‑test (FIXED – uses _decompress_auto to handle fallback)
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
@@ -863,6 +863,7 @@ class PAQJPCompressor:
         print("=" * 60)
         all_ok = True
 
+        # 1. Single transforms on all bytes
         print("Testing all 256 single transforms on all 256 byte values...")
         for t_num in range(1, 257):
             for b in range(256):
@@ -887,6 +888,7 @@ class PAQJPCompressor:
             print("\n[FAIL] Single‑transform test failed.")
             return False
 
+        # 2. Pairs on all bytes
         print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
         for idx, seq in enumerate(self.sequences):
             for b in range(256):
@@ -911,46 +913,28 @@ class PAQJPCompressor:
             return False
         print("  PASS: all pairs OK on all bytes")
 
+        # 3. Random data full pipeline – uses _decompress_auto for robustness
         print("\nTesting random 1000‑byte block through full compress/decompress...")
         rng = random.Random(12345)
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
 
         for mode_name, safe in [("marker‑free", False), ("safe", True)]:
-            compressed = self.compress_with_best(test_data, safe=safe)
-
-            offset, seq = self._decode_header(compressed)
-            payload = compressed[offset:]
-            backend = self._decompress_backend(payload, safe=safe)
-            if backend is None:
-                print(f"  FAIL: backend decompression returned None in {mode_name} mode")
-                return False
-
-            if seq:
-                try:
-                    result = self._reverse_sequence(backend, seq)
-                except Exception as e:
-                    print(f"  FAIL: reverse sequence error in {mode_name} mode: {e}")
-                    return False
-            else:
-                result = backend
-
-            if result != test_data:
+            compressed = self.compress_with_best(test_data, safe=safe, ultra=True)
+            # Use _decompress_auto to correctly handle any internal fallback
+            decompressed, _ = self._decompress_auto(compressed)
+            if decompressed != test_data:
                 print(f"  FAIL: random data pipeline mismatch in {mode_name} mode")
                 return False
 
         print("  PASS: random data pipeline OK in both modes")
 
+        # 4. Empty input
         print("\nTesting empty input...")
         for safe in [False, True]:
             compressed_empty = self.compress_with_best(b'', safe)
-            offset, seq = self._decode_header(compressed_empty)
-            payload = compressed_empty[offset:]
-            backend = self._decompress_backend(payload, safe=safe)
-            if backend is None:
-                print(f"  FAIL: empty input backend failed (safe={safe})")
-                return False
-            if backend != b'':
-                print(f"  FAIL: empty input mismatch (safe={safe})")
+            decomp_empty, _ = self._decompress_auto(compressed_empty)
+            if decomp_empty != b'':
+                print(f"  FAIL: empty input pipeline mismatch (safe={safe})")
                 return False
         print("  PASS: empty input pipeline OK")
 
@@ -958,7 +942,7 @@ class PAQJPCompressor:
         return True
 
     # ------------------------------------------------------------------
-    # File API (with ultra flag for compress)
+    # File API
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True):
         try:
