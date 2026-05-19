@@ -21,3 +21,22 @@ UPGRADE\_PAQJPVG Compression 2704 tranfomations losslessness Lossless 100% and w
 
 Group: Jurijus Pacalovas and Vincent Geoghegan helped add 1 byte to the front markers.
 We use markers for my paq: use 1-2 bytes; also use 1 byte: uses 00 63 00 00 or 28 B5 2F FD
+
+Checked:
+
+Group: Jurijus Pacalovas and Vincent Geoghegan helped add 1 byte to the front markers. We use markers for my paq: use 1-2 bytes; also use 1 byte: uses 00 63 00 00 or 28 B5 2F FD
+
+Here is Portfolio UPGRADE_PAQJPVG
+We have written 7 versions of software and me help little bit Vincent Geoghegan
+
+PAQJP_8.2;
+PAQJP 8.3;
+PAQJP_8.4;
+PAQJP_8.5;
+PAQJP_8.5Long;
+PAQJP_8.6;
+PAQJP_8.8
+
+All Hybrid software tested Software is working correctly without bugs and without Errors
+
+The best our PAQJP_8.8 enjoy our 7 software common download and enjoy!
