@@ -39,4 +39,4 @@ PAQJP_8.8
 
 All Hybrid software tested Software is working correctly without bugs and without Errors
 
-The best our PAQJP_8.8 enjoy our 7 software common download and enjoy!
+The best our PAQJP_8.8
