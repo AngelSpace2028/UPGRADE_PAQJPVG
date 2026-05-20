@@ -19,10 +19,10 @@ HEADER FORMAT (variable‑length):
 
 BACKEND COMPRESSION (dual mode):
    Marker‑free (default):
-     zstd output  : just the raw zstd stream (no marker)
-     paq  output  : just the raw paq stream (no marker)
-     raw  output  : b'N' + original data
-     Decompression order: Zstd → PAQ → raw (if first byte == 'N')
+     zstd output  : raw zstd stream (no marker)
+     paq  output  : raw paq stream (no marker)
+     raw  output  : original data (no marker)
+     Decompression order: Zstd → PAQ → raw (no leading marker)
    Safe (automatic fallback):
      zstd output  : b'Z' + raw_zstd_stream
      paq  output  : b'P' + raw_paq_stream
@@ -64,15 +64,17 @@ PROGNAME = "PAQJP_8.8_LOSSLESS_AUTO_SAFE"
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))]
 PI_DIGITS = [79, 17, 111]
 
-# ---------- Helper: nearest prime ----------
+# ---------- Helper: nearest prime (never >255) ----------
 def find_nearest_prime_around(n: int) -> int:
+    """Return the nearest prime to n, but clamp to [2, 251] to avoid byte overflow."""
+    n = max(2, min(n, 255))
     o = 0
     while True:
         c1, c2 = n - o, n + o
         if c1 >= 2 and all(c1 % d != 0 for d in range(2, int(c1 ** 0.5) + 1)):
-            return c1
+            return min(c1, 255)
         if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2 ** 0.5) + 1)):
-            return c2
+            return min(c2, 255)
         o += 1
 
 # ---------- Main Compressor Class ----------
@@ -335,8 +337,7 @@ class PAQJPCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01‑21
-    # (unchanged, same as original)
+    # Transforms 01‑21 (unchanged, symmetric)
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
@@ -676,7 +677,7 @@ class PAQJPCompressor:
         return result
 
     # ------------------------------------------------------------------
-    # Compression backends (dual mode)
+    # FIXED compression backends (dual mode)
     # ------------------------------------------------------------------
     def _compress_backend(self, data: bytes, safe: bool = False) -> bytes:
         candidates = []
@@ -685,7 +686,7 @@ class PAQJPCompressor:
                 if safe:
                     candidates.append((b'P', b'P' + paq.compress(data)))
                 else:
-                    candidates.append((b'L', paq.compress(data)))  # dummy marker for length calc
+                    candidates.append((b'P', paq.compress(data)))   # raw paq stream
             except:
                 pass
         if HAS_ZSTD:
@@ -693,21 +694,18 @@ class PAQJPCompressor:
                 if safe:
                     candidates.append((b'Z', b'Z' + zstd_cctx.compress(data)))
                 else:
-                    candidates.append((b'Z', zstd_cctx.compress(data)))
+                    candidates.append((b'Z', zstd_cctx.compress(data)))   # raw zstd stream
             except:
                 pass
-        candidates.append((b'N', b'N' + data))
-        if not candidates:
-            return b'N' + data
-        # For marker-free we need to strip the dummy marker from length comparison
-        if not safe:
-            # In marker-free mode, we keep the shortest stream (they are raw streams except 'N' case)
-            _, best = min(candidates, key=lambda x: len(x[1]))
-            return best
+        if safe:
+            candidates.append((b'N', b'N' + data))   # raw with marker
         else:
-            # In safe mode, the streams already include the marker byte
-            _, best = min(candidates, key=lambda x: len(x[1]))
-            return best
+            candidates.append((b'N', data))          # raw data (no marker)
+
+        if not candidates:
+            return data if not safe else b'N' + data
+        _, best = min(candidates, key=lambda x: len(x[1]))
+        return best
 
     def _decompress_backend(self, data: bytes, safe: bool = False) -> Optional[bytes]:
         if len(data) == 0:
@@ -728,7 +726,7 @@ class PAQJPCompressor:
                 except:
                     pass
             return None
-        # marker‑free: try zstd, then paq, then check if raw 'N' marker
+        # marker‑free: try zstd, then paq, then check if raw data starts with N (already raw)
         if HAS_ZSTD:
             try:
                 return zstd_dctx.decompress(data)
@@ -739,9 +737,8 @@ class PAQJPCompressor:
                 return paq.decompress(data)
             except:
                 pass
-        if len(data) > 0 and data[0] == ord('N'):
-            return data[1:]
-        return None
+        # If still not decompressed, assume raw data (marker‑free raw never has a marker)
+        return data
 
     # ------------------------------------------------------------------
     # Variable‑length header encoding / decoding
@@ -836,7 +833,7 @@ class PAQJPCompressor:
         decomp, _ = self._decompress_auto(best_bytes)
         if decomp != data:
             if not safe:
-                print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
+                # Fall back to safe mode (will add explicit markers)
                 return self.compress_with_best(data, safe=True, ultra=ultra)
             else:
                 raise RuntimeError("Safe compression failed – unexpected internal error!")
@@ -851,15 +848,15 @@ class PAQJPCompressor:
         if not payload:
             return b'', None
 
-        # **KEY FIX**: Look at the first byte to decide safe vs. marker‑free
+        # Determine if safe mode (first byte is one of N, Z, P) or marker‑free
         first_byte = payload[0:1]
         if first_byte in (b'N', b'Z', b'P'):
-            # Safe mode: marker byte present → use safe backend exclusively
+            # Safe mode: marker present
             res = self._decompress_backend(payload, safe=True)
             if res is None:
                 return b'', None
         else:
-            # Marker‑free mode: no leading marker → try marker‑free backends
+            # Marker‑free mode: try backends directly
             res = self._decompress_backend(payload, safe=False)
             if res is None:
                 return b'', None
@@ -874,7 +871,7 @@ class PAQJPCompressor:
         return result, seq
 
     # ------------------------------------------------------------------
-    # Exhaustive self‑test (now uses the corrected decompressor)
+    # Exhaustive self‑test
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
