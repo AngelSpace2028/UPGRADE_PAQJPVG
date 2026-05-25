@@ -1,0 +1,76 @@
+Algorithm 23, named Constant Diapason, is a lossless transform that re‑encodes a file’s bytes as a sequence of variable‑length binary codewords.
+It does not compress the data in a traditional sense – it simply remaps 4‑bit nibbles to a prefix‑free code, which can sometimes produce a smaller representation when certain nibbles appear very frequently.
+
+---
+
+How it works
+
+1. Bit‑stream conversion
+   The input bytes are turned into a stream of bits (MSB first).
+   Example: bytes \xAB \xCD become the bits 1010 1011 1100 1101.
+2. Nibble splitting
+   The bit stream is split into groups of 4 (nibbles).
+   If the total number of bits is not a multiple of 4, zero bits are appended to complete the final nibble.
+   The number of added padding bits (0, 1, 2, or 3) is stored.
+3. Codeword mapping
+   Each nibble (0–15) is replaced by a variable‑length codeword according to a fixed, prefix‑free table:
+   Nibble Codeword (binary) Length
+   0 0 1 bit
+   1 1 1 bit
+   2 00 2 bits
+   3 01 2 bits
+   4 10 2 bits
+   5 11 2 bits
+   6 000 3 bits
+   7 001 3 bits
+   8 010 3 bits
+   9 011 3 bits
+   10 100 3 bits
+   11 101 3 bits
+   12 110 3 bits
+   13 111 3 bits
+   14 0000 4 bits
+   15 0001 4 bits
+   This table is prefix‑free – no codeword is a prefix of another, which guarantees unambiguous decoding.
+4. Header and final packing
+   The padding amount (0‑3) is written as a 2‑bit header.
+   The final bit stream = [2‑bit padding info] + [concatenated codewords].
+   This stream is then padded with zeros to a full byte boundary, and the resulting bytes are returned.
+
+---
+
+Decoding (reverse transform)
+
+1. The first 2 bits of the encoded data give the padding amount.
+2. The decoder reads bits sequentially, trying to match one of the valid codewords using a lookup tree built from the same table.
+3. Once a codeword is matched, the corresponding nibble (0‑15) is output.
+4. This continues until all bits are consumed. The nibbles are reassembled into a bit stream, and the trailing padding bits (known from the header) are removed.
+5. The final bit stream is converted back into bytes.
+
+Because the code is prefix‑free, the decoder can never misinterpret where one codeword ends and the next begins – the transform is mathematically lossless for any input.
+
+---
+
+Example
+
+Input: a single byte \x00 (bits 0000 0000 – two nibbles of value 0).
+
+· Nibble 0 → codeword 0
+· Nibble 0 → codeword 0
+· No padding needed → header 00
+· Result bit stream: 00 + 0 + 0 = 0000 → padded to byte → \x00.
+
+If instead the input were \x0F (bits 0000 1111 → nibbles 0 and 15):
+
+· Nibble 0 → 0
+· Nibble 15 → 0001
+· Header 00
+· Stream: 00 + 0 + 0001 = 00000001 → \x01.
+
+The decoder would extract 00 (padding=0), then read the first 0 → nibble 0, then the remaining bits 0001 → nibble 15, and reconstruct \x0F.
+
+---
+
+Why “Constant Diapason”?
+
+The name refers to a fixed, limited‑range (diapason) mapping that stays constant for all files. The codeword lengths are optimised so that nibbles 0–1 are very short (1 bit), nibbles 2–5 are 2 bits, nibbles 6–13 are 3 bits, and only the rarest nibbles 14–15 use 4 bits. This biases the representation toward smaller sizes when the data contains many small nibble values – a statistical property, not a guarantee.
