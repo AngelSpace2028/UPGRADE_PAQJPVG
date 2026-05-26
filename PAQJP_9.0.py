@@ -58,16 +58,24 @@ def find_nearest_prime_around(n: int) -> int:
             return c2
         o += 1
 
-# ---------- Constant Diapason (transform 23) tables ----------
-_CONST_DIAPASON_CODE = [
-    (1, 0b0), (1, 0b1), (2, 0b00), (2, 0b01), (2, 0b10), (2, 0b11),
-    (3, 0b000), (3, 0b001), (3, 0b010), (3, 0b011), (3, 0b100),
-    (3, 0b101), (3, 0b110), (3, 0b111), (4, 0b0000), (4, 0b0001)
+# ---------- Prefix‑free nibble code for transform 23 (iterative) ----------
+# Nibble 0 -> 10, 1 -> 11, 2 -> 010, 3 -> 011, 4 -> 0010, 5 -> 0011,
+# 6 -> 00010, 7 -> 00011, 8 -> 000010, 9 -> 000011,
+# 10-> 0000010, 11-> 0000011, 12-> 00000010, 13-> 00000011,
+# 14-> 000000010, 15-> 000000011
+_CONST_DIAPASON_ITER_CODE = [
+    (2, 0b10), (2, 0b11),
+    (3, 0b010), (3, 0b011),
+    (4, 0b0010), (4, 0b0011),
+    (5, 0b00010), (5, 0b00011),
+    (6, 0b000010), (6, 0b000011),
+    (7, 0b0000010), (7, 0b0000011),
+    (8, 0b00000010), (8, 0b00000011),
+    (9, 0b000000010), (9, 0b000000011),
 ]
-_CONST_DIAPASON_DECODE = {}
-for nibble, (length, bits) in enumerate(_CONST_DIAPASON_CODE):
-    key = (length, bits)
-    _CONST_DIAPASON_DECODE[key] = nibble
+_CONST_DIAPASON_ITER_DECODE = {}
+for nibble, (length, bits) in enumerate(_CONST_DIAPASON_ITER_CODE):
+    _CONST_DIAPASON_ITER_DECODE[(length, bits)] = nibble
 
 # ---------- Main Compressor Class ----------
 class PAQJPCompressor:
@@ -599,78 +607,103 @@ class PAQJPCompressor:
         return bytes(t)
 
     # ------------------------------------------------------------------
-    # Transform 23: Constant Diapason
+    # Transform 23: Iterative Constant Diapason (lossless, converges)
     # ------------------------------------------------------------------
     def transform_23(self, data: bytes) -> bytes:
-        if not data: return b''
+        if not data: return b'\x00\x00\x01'  # 0 original bits, 1 pass -> empty
+        # convert to bit list
         bits = []
         for byte in data:
             for i in range(7, -1, -1):
                 bits.append((byte >> i) & 1)
-        total_nibbles = len(bits) // 4
-        remaining_bits = len(bits) % 4
-        if remaining_bits > 0:
-            bits += [0] * (4 - remaining_bits)
-            total_nibbles += 1
-        encoded_bits = []
-        for i in range(total_nibbles):
-            nibble = (bits[i*4] << 3) | (bits[i*4+1] << 2) | (bits[i*4+2] << 1) | bits[i*4+3]
-            length, codeword = _CONST_DIAPASON_CODE[nibble]
-            for b in range(length-1, -1, -1):
-                encoded_bits.append((codeword >> b) & 1)
-        padding_info = (4 - remaining_bits) % 4
-        header_bits = [(padding_info >> 1) & 1, padding_info & 1]
-        encoded_bits = header_bits + encoded_bits
-        while len(encoded_bits) % 8 != 0:
-            encoded_bits.append(0)
+        orig_bit_len = len(bits)
+
+        current_bits = bits
+        prev_len = orig_bit_len
+        pass_count = 0
+        while True:
+            pass_count += 1
+            # pad to complete nibble
+            pad_len = (4 - len(current_bits) % 4) % 4
+            current_bits += [0] * pad_len
+            nibble_count = len(current_bits) // 4
+            encoded_bits = []
+            for i in range(nibble_count):
+                nibble = (current_bits[i*4] << 3) | (current_bits[i*4+1] << 2) | (current_bits[i*4+2] << 1) | current_bits[i*4+3]
+                length, codeword = _CONST_DIAPASON_ITER_CODE[nibble]
+                for b in range(length-1, -1, -1):
+                    encoded_bits.append((codeword >> b) & 1)
+            new_len = len(encoded_bits)
+            # stop if we didn't shrink, or reached 255 passes
+            if new_len >= prev_len or pass_count >= 255:
+                # undo last pass (don't apply it) and break
+                break
+            current_bits = encoded_bits
+            prev_len = new_len
+        # header: 2 bytes original bit length (big-endian), 1 byte pass_count (1-255)
+        header = bytes([(orig_bit_len >> 8) & 0xFF, orig_bit_len & 0xFF, pass_count])
+        # pack current_bits to bytes (pad to multiple of 8)
+        pad = (8 - len(current_bits) % 8) % 8
+        current_bits += [0] * pad
         out_bytes = bytearray()
-        for i in range(0, len(encoded_bits), 8):
-            byte_val = 0
+        for i in range(0, len(current_bits), 8):
+            val = 0
             for j in range(8):
-                byte_val = (byte_val << 1) | encoded_bits[i+j]
-            out_bytes.append(byte_val)
-        return bytes(out_bytes)
+                val = (val << 1) | current_bits[i+j]
+            out_bytes.append(val)
+        return header + bytes(out_bytes)
 
     def reverse_transform_23(self, data: bytes) -> bytes:
-        if not data: return b''
+        if len(data) < 3: return b''
+        orig_bit_len = (data[0] << 8) | data[1]
+        pass_count = data[2]
+        if pass_count == 0: return b''
+        payload = data[3:]
+        # convert payload to bits
         bits = []
-        for byte in data:
+        for byte in payload:
             for i in range(7, -1, -1):
                 bits.append((byte >> i) & 1)
-        if len(bits) < 2: return b''
-        padding_info = (bits[0] << 1) | bits[1]
-        pos = 2
-        decoded_nibbles = []
-        while pos < len(bits):
-            matched = False
-            for length in (1, 2, 3, 4):
-                if pos + length > len(bits): continue
-                codeword = 0
-                for k in range(length):
-                    codeword = (codeword << 1) | bits[pos + k]
-                key = (length, codeword)
-                if key in _CONST_DIAPASON_DECODE:
-                    decoded_nibbles.append(_CONST_DIAPASON_DECODE[key])
-                    pos += length
-                    matched = True
+        current_bits = bits
+        for _ in range(pass_count):
+            # decode prefix-free codes back to nibbles
+            pos = 0
+            decoded_nibbles = []
+            nbits = len(current_bits)
+            while pos < nbits:
+                matched = False
+                for length in range(2, 10):   # max code length is 9
+                    if pos + length > nbits: continue
+                    codeword = 0
+                    for k in range(length):
+                        codeword = (codeword << 1) | current_bits[pos + k]
+                    key = (length, codeword)
+                    if key in _CONST_DIAPASON_ITER_DECODE:
+                        decoded_nibbles.append(_CONST_DIAPASON_ITER_DECODE[key])
+                        pos += length
+                        matched = True
+                        break
+                if not matched:
                     break
-            if not matched: break
-        original_bit_count = len(decoded_nibbles) * 4 - padding_info
-        if original_bit_count < 0: return b''
-        original_bits = []
-        for n in decoded_nibbles:
-            for j in range(3, -1, -1):
-                original_bits.append((n >> j) & 1)
-        original_bits = original_bits[:original_bit_count]
+            # convert nibbles to bits
+            new_bits = []
+            for nibble in decoded_nibbles:
+                for j in range(3, -1, -1):
+                    new_bits.append((nibble >> j) & 1)
+            current_bits = new_bits
+        # trim to original bit length
+        if len(current_bits) < orig_bit_len:
+            return b''
+        current_bits = current_bits[:orig_bit_len]
+        # convert bits to bytes
         out_bytes = bytearray()
-        for i in range(0, len(original_bits), 8):
-            byte_val = 0
-            for j in range(i, min(i+8, len(original_bits))):
-                byte_val = (byte_val << 1) | original_bits[j]
-            if i+8 > len(original_bits):
-                shift = 8 - (len(original_bits) - i)
-                byte_val <<= shift
-            out_bytes.append(byte_val)
+        for i in range(0, len(current_bits), 8):
+            val = 0
+            for j in range(i, min(i+8, len(current_bits))):
+                val = (val << 1) | current_bits[j]
+            shift = 8 - (len(current_bits) - i) if i+8 > len(current_bits) else 0
+            val <<= shift
+            out_bytes.append(val)
         return bytes(out_bytes)
 
     # ------------------------------------------------------------------
