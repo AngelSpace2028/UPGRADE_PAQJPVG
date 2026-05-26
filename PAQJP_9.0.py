@@ -608,10 +608,13 @@ class PAQJPCompressor:
 
     # ------------------------------------------------------------------
     # Transform 23: Iterative Constant Diapason (lossless, converges)
+    # Fixed version: only count passes that actually shrink the data.
     # ------------------------------------------------------------------
     def transform_23(self, data: bytes) -> bytes:
-        if not data: return b'\x00\x00\x01'  # 0 original bits, 1 pass -> empty
-        # convert to bit list
+        if not data:
+            # Empty input: no bits, zero passes
+            return b'\x00\x00\x00'
+        # convert to bit list (MSB first)
         bits = []
         for byte in data:
             for i in range(7, -1, -1):
@@ -621,28 +624,30 @@ class PAQJPCompressor:
         current_bits = bits
         prev_len = orig_bit_len
         pass_count = 0
-        while True:
-            pass_count += 1
-            # pad to complete nibble
+        # Keep applying the transform while it reduces size (max 255 passes)
+        while pass_count < 255:
+            # pad current_bits to complete nibble
             pad_len = (4 - len(current_bits) % 4) % 4
-            current_bits += [0] * pad_len
-            nibble_count = len(current_bits) // 4
+            padded = current_bits + [0] * pad_len
+            nibble_count = len(padded) // 4
             encoded_bits = []
             for i in range(nibble_count):
-                nibble = (current_bits[i*4] << 3) | (current_bits[i*4+1] << 2) | (current_bits[i*4+2] << 1) | current_bits[i*4+3]
+                nibble = (padded[i*4] << 3) | (padded[i*4+1] << 2) | (padded[i*4+2] << 1) | padded[i*4+3]
                 length, codeword = _CONST_DIAPASON_ITER_CODE[nibble]
                 for b in range(length-1, -1, -1):
                     encoded_bits.append((codeword >> b) & 1)
             new_len = len(encoded_bits)
-            # stop if we didn't shrink, or reached 255 passes
-            if new_len >= prev_len or pass_count >= 255:
-                # undo last pass (don't apply it) and break
+            if new_len < prev_len:
+                # Accept this pass
+                current_bits = encoded_bits
+                prev_len = new_len
+                pass_count += 1
+            else:
+                # No improvement – stop
                 break
-            current_bits = encoded_bits
-            prev_len = new_len
-        # header: 2 bytes original bit length (big-endian), 1 byte pass_count (1-255)
+        # Header: 2 bytes original bit length (big-endian), 1 byte pass_count
         header = bytes([(orig_bit_len >> 8) & 0xFF, orig_bit_len & 0xFF, pass_count])
-        # pack current_bits to bytes (pad to multiple of 8)
+        # Pack current_bits to bytes (pad to multiple of 8)
         pad = (8 - len(current_bits) % 8) % 8
         current_bits += [0] * pad
         out_bytes = bytearray()
@@ -654,26 +659,33 @@ class PAQJPCompressor:
         return header + bytes(out_bytes)
 
     def reverse_transform_23(self, data: bytes) -> bytes:
-        if len(data) < 3: return b''
+        if len(data) < 3:
+            return b''
         orig_bit_len = (data[0] << 8) | data[1]
         pass_count = data[2]
-        if pass_count == 0: return b''
-        payload = data[3:]
-        # convert payload to bits
+        if pass_count == 0:
+            # No compression passes: payload is just the original bits (padded)
+            payload = data[3:]
+        else:
+            payload = data[3:]
+        # Convert payload to bits
         bits = []
         for byte in payload:
             for i in range(7, -1, -1):
                 bits.append((byte >> i) & 1)
         current_bits = bits
+        # Apply reverse passes
         for _ in range(pass_count):
-            # decode prefix-free codes back to nibbles
+            # Decode prefix-free codes back to nibbles
             pos = 0
-            decoded_nibbles = []
             nbits = len(current_bits)
+            decoded_nibbles = []
             while pos < nbits:
                 matched = False
-                for length in range(2, 10):   # max code length is 9
-                    if pos + length > nbits: continue
+                # Try lengths from 2 to 9 (maximum code length)
+                for length in range(2, 10):
+                    if pos + length > nbits:
+                        continue
                     codeword = 0
                     for k in range(length):
                         codeword = (codeword << 1) | current_bits[pos + k]
@@ -684,25 +696,27 @@ class PAQJPCompressor:
                         matched = True
                         break
                 if not matched:
+                    # Unmatched bits – must be padding zeros, stop decoding
                     break
-            # convert nibbles to bits
+            # Convert nibbles back to bits (4 bits per nibble)
             new_bits = []
             for nibble in decoded_nibbles:
                 for j in range(3, -1, -1):
                     new_bits.append((nibble >> j) & 1)
             current_bits = new_bits
-        # trim to original bit length
+        # Trim to original bit length
         if len(current_bits) < orig_bit_len:
             return b''
         current_bits = current_bits[:orig_bit_len]
-        # convert bits to bytes
+        # Convert bits to bytes
         out_bytes = bytearray()
         for i in range(0, len(current_bits), 8):
             val = 0
             for j in range(i, min(i+8, len(current_bits))):
                 val = (val << 1) | current_bits[j]
-            shift = 8 - (len(current_bits) - i) if i+8 > len(current_bits) else 0
-            val <<= shift
+            # Shift if last byte is incomplete (should not happen because orig_bit_len is a multiple of 8? but safe)
+            if i+8 > len(current_bits):
+                val <<= (8 - (len(current_bits) - i))
             out_bytes.append(val)
         return bytes(out_bytes)
 
