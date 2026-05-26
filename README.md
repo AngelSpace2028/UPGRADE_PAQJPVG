@@ -3,7 +3,7 @@ UPGRADE\_PAQJPVG Compression hybrid Software is working correctly without bugs a
 PAQJPVG_8.5-4 Replit App by Jurijus Pacalovas 8.5L-4 PAQ level 9 and zstandard level 22
 https://6d12ff49-574e-490c-a27e-ce0b42018552-00-2nsbwpijno5md.kirk.replit.dev
 
-PAQJP_8.2,3,4, 5, 5L, 6, 8.8 The best paq level 10 and zstandard level 22 Done all 2026 year in May 6 by Jurijus Pacalovas and Vincent Geoghegan (I recommend version 8.4 it’s 1.3KB/s)
+PAQJP_8.2,3,4, 5, 5L, 6, 8.8, 9.0 The best paq level 10 and zstandard level 22 Done all 2026 year in May 6 by Jurijus Pacalovas and Vincent Geoghegan (I recommend version 8.4 it’s 1.3KB/s)
 
 Python 3.7.4
 
@@ -36,6 +36,7 @@ PAQJP_8.5;
 PAQJP_8.5Long;
 PAQJP_8.6;
 PAQJP_8.8
+PAQJP_9.0
 
 All Hybrid software tested Software is working correctly without bugs and without Errors
 
