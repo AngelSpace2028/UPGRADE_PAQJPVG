@@ -894,12 +894,10 @@ class PAQJPCompressorTransform65535:
         return bytes([252])
 
     def _encode_marker_pair(self, t1: int, t2: int) -> bytes:
+        # Fixed: removed incorrect index adjustment for t1 == 256
         idx = (t1 - 1) * 256 + (t2 - 1)
         if t1 == 256 and t2 == 256:
             raise ValueError("Identity pair excluded")
-        # adjust index because we skipped (256,256)
-        if t1 == 256:
-            idx -= 1
         return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
 
     def _decode_header(self, data: bytes):
