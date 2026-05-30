@@ -5,8 +5,9 @@ PAQJP 9.0 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 (Strict marker‑free – no markers in the compressed payload)
 ============================================================================
 
-All single transforms (1‑256), all ordered pairs (52×52=2704), and the raw
-(no‑transform) path are mathematically lossless.
+All single transforms (1‑255, excluding identity 256 that is covered by raw),
+all ordered pairs (52×52=2704), and the raw (no‑transform) path are
+mathematically lossless.
 
 Output format:
     [variable‑length transform header] + [raw backend stream]
@@ -19,7 +20,7 @@ will refuse to produce an output and print an error message.
 Usage:
     python paqjp90.py
     Choose 1 (compress), 2 (decompress), or 3 (full self‑test).
-    When compressing, choose Fast (256 transforms) or Ultra (256+2704 pairs).
+    When compressing, choose Fast (255 transforms) or Ultra (255+2704 pairs).
 """
 
 import math
@@ -59,10 +60,6 @@ def find_nearest_prime_around(n: int) -> int:
         o += 1
 
 # ---------- Prefix‑free nibble code for transform 23 (iterative) ----------
-# Nibble 0 -> 10, 1 -> 11, 2 -> 010, 3 -> 011, 4 -> 0010, 5 -> 0011,
-# 6 -> 00010, 7 -> 00011, 8 -> 000010, 9 -> 000011,
-# 10-> 0000010, 11-> 0000011, 12-> 00000010, 13-> 00000011,
-# 14-> 000000010, 15-> 000000011
 _CONST_DIAPASON_ITER_CODE = [
     (2, 0b10), (2, 0b11),
     (3, 0b010), (3, 0b011),
@@ -608,13 +605,11 @@ class PAQJPCompressor:
 
     # ------------------------------------------------------------------
     # Transform 23: Iterative Constant Diapason (lossless, converges)
-    # Fixed version: only count passes that actually shrink the data.
+    # Fixed header: 3 bytes for bit length (supports up to ~2 MB)
     # ------------------------------------------------------------------
     def transform_23(self, data: bytes) -> bytes:
         if not data:
-            # Empty input: no bits, zero passes
-            return b'\x00\x00\x00'
-        # convert to bit list (MSB first)
+            return b'\x00\x00\x00\x00'
         bits = []
         for byte in data:
             for i in range(7, -1, -1):
@@ -624,9 +619,7 @@ class PAQJPCompressor:
         current_bits = bits
         prev_len = orig_bit_len
         pass_count = 0
-        # Keep applying the transform while it reduces size (max 255 passes)
         while pass_count < 255:
-            # pad current_bits to complete nibble
             pad_len = (4 - len(current_bits) % 4) % 4
             padded = current_bits + [0] * pad_len
             nibble_count = len(padded) // 4
@@ -638,16 +631,19 @@ class PAQJPCompressor:
                     encoded_bits.append((codeword >> b) & 1)
             new_len = len(encoded_bits)
             if new_len < prev_len:
-                # Accept this pass
                 current_bits = encoded_bits
                 prev_len = new_len
                 pass_count += 1
             else:
-                # No improvement – stop
                 break
-        # Header: 2 bytes original bit length (big-endian), 1 byte pass_count
-        header = bytes([(orig_bit_len >> 8) & 0xFF, orig_bit_len & 0xFF, pass_count])
-        # Pack current_bits to bytes (pad to multiple of 8)
+
+        # Header: 3 bytes for original bit length (big-endian), 1 byte pass_count
+        header = bytes([
+            (orig_bit_len >> 16) & 0xFF,
+            (orig_bit_len >> 8) & 0xFF,
+            orig_bit_len & 0xFF,
+            pass_count
+        ])
         pad = (8 - len(current_bits) % 8) % 8
         current_bits += [0] * pad
         out_bytes = bytearray()
@@ -659,30 +655,22 @@ class PAQJPCompressor:
         return header + bytes(out_bytes)
 
     def reverse_transform_23(self, data: bytes) -> bytes:
-        if len(data) < 3:
+        if len(data) < 4:
             return b''
-        orig_bit_len = (data[0] << 8) | data[1]
-        pass_count = data[2]
-        if pass_count == 0:
-            # No compression passes: payload is just the original bits (padded)
-            payload = data[3:]
-        else:
-            payload = data[3:]
-        # Convert payload to bits
+        orig_bit_len = (data[0] << 16) | (data[1] << 8) | data[2]
+        pass_count = data[3]
+        payload = data[4:]
         bits = []
         for byte in payload:
             for i in range(7, -1, -1):
                 bits.append((byte >> i) & 1)
         current_bits = bits
-        # Apply reverse passes
         for _ in range(pass_count):
-            # Decode prefix-free codes back to nibbles
             pos = 0
             nbits = len(current_bits)
             decoded_nibbles = []
             while pos < nbits:
                 matched = False
-                # Try lengths from 2 to 9 (maximum code length)
                 for length in range(2, 10):
                     if pos + length > nbits:
                         continue
@@ -696,32 +684,28 @@ class PAQJPCompressor:
                         matched = True
                         break
                 if not matched:
-                    # Unmatched bits – must be padding zeros, stop decoding
                     break
-            # Convert nibbles back to bits (4 bits per nibble)
             new_bits = []
             for nibble in decoded_nibbles:
                 for j in range(3, -1, -1):
                     new_bits.append((nibble >> j) & 1)
             current_bits = new_bits
-        # Trim to original bit length
+
         if len(current_bits) < orig_bit_len:
             return b''
         current_bits = current_bits[:orig_bit_len]
-        # Convert bits to bytes
         out_bytes = bytearray()
         for i in range(0, len(current_bits), 8):
             val = 0
             for j in range(i, min(i+8, len(current_bits))):
                 val = (val << 1) | current_bits[j]
-            # Shift if last byte is incomplete (should not happen because orig_bit_len is a multiple of 8? but safe)
             if i+8 > len(current_bits):
                 val <<= (8 - (len(current_bits) - i))
             out_bytes.append(val)
         return bytes(out_bytes)
 
     # ------------------------------------------------------------------
-    # NEW Transform 24 – constant‑byte run compression inside 43‑byte blocks
+    # Transform 24 – constant‑byte run compression inside 43‑byte blocks
     # ------------------------------------------------------------------
     def transform_24(self, data: bytes) -> bytes:
         if not data: return b''
@@ -787,24 +771,9 @@ class PAQJPCompressor:
                     out.append(b)
         return bytes(out)
 
-    def transform_256(self, d: bytes) -> bytes:
-        return d
-    reverse_transform_256 = transform_256
-
     # ------------------------------------------------------------------
-    # Helpers
+    # Dynamic transforms for numbers 25..255
     # ------------------------------------------------------------------
-    def _get_pattern(self, size: int, index: int):
-        random.seed(12345 + size * 100 + index)
-        return [random.randint(0, 255) for _ in range(size)]
-
-    def _calculate_repeats(self, data: bytes) -> int:
-        if not data: return 1
-        length = len(data)
-        byte_sum = sum(data) % 256
-        repeats = ((length * 13 + byte_sum * 17) % 256) + 1
-        return max(1, min(256, repeats))
-
     def _dynamic_transform(self, n: int):
         def tf(data: bytes):
             if not data: return b''
@@ -815,11 +784,12 @@ class PAQJPCompressor:
         return tf, tf
 
     # ------------------------------------------------------------------
-    # Build transform maps (1..256)
+    # Build transform maps (1..255, 256 is identity, covered by raw)
     # ------------------------------------------------------------------
     def _build_transform_maps(self):
         self.fwd_transforms: Dict[int, Callable] = {}
         self.rev_transforms: Dict[int, Callable] = {}
+
         self.fwd_transforms[1] = self.transform_00; self.rev_transforms[1] = self.reverse_transform_00
         self.fwd_transforms[2] = self.transform_01; self.rev_transforms[2] = self.reverse_transform_01
         self.fwd_transforms[3] = self.transform_02; self.rev_transforms[3] = self.reverse_transform_02
@@ -844,14 +814,15 @@ class PAQJPCompressor:
         self.fwd_transforms[22] = self.transform_21; self.rev_transforms[22] = self.reverse_transform_21
         self.fwd_transforms[23] = self.transform_23; self.rev_transforms[23] = self.reverse_transform_23
         self.fwd_transforms[24] = self.transform_24; self.rev_transforms[24] = self.reverse_transform_24
+
         for i in range(25, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
-        self.fwd_transforms[256] = self.transform_256; self.rev_transforms[256] = self.reverse_transform_256
-        for i in range(1, 257):
-            if i not in self.fwd_transforms:
-                raise RuntimeError(f"Transform {i} missing!")
+
+        # Identity is built‑in, but we keep it for completeness in the map (not used for single transforms)
+        self.fwd_transforms[256] = lambda d: d
+        self.rev_transforms[256] = lambda d: d
 
     # ------------------------------------------------------------------
     # Build pair sequences – 2704 (52×52)
@@ -876,7 +847,7 @@ class PAQJPCompressor:
     # Compression backends – strictly marker‑free
     # ------------------------------------------------------------------
     def _compress_backend(self, data: bytes) -> bytes:
-        """Returns the raw compressed stream (no markers)."""
+        """Returns the smallest raw compressed stream (no markers)."""
         candidates = []
         if HAS_ZSTD:
             try:
@@ -888,36 +859,33 @@ class PAQJPCompressor:
                 candidates.append(paq.compress(data))
             except:
                 pass
-        # Raw data is always a fallback
-        candidates.append(data)
-        # Return the smallest
+        candidates.append(data)  # raw fallback
         return min(candidates, key=len)
 
     def _decompress_backend(self, data: bytes) -> Optional[bytes]:
-        """Tries zstd, then paq, then returns the raw data unchanged."""
+        """Tries zstd, then paq, then returns the data unchanged."""
         if len(data) == 0:
             return b''
-        # Try zstd
         if HAS_ZSTD:
             try:
                 return zstd_dctx.decompress(data)
             except:
                 pass
-        # Try paq
         if paq is not None:
             try:
                 return paq.decompress(data)
             except:
                 pass
-        # Assume raw
         return data
 
     # ------------------------------------------------------------------
     # Variable‑length header encoding / decoding
     # ------------------------------------------------------------------
     def _encode_marker_single(self, t: int) -> bytes:
+        """Encode a single transform (1‑255). 256 is not used this way."""
         if t <= 252:
             return bytes([t - 1])
+        # 253, 254, 255 → two bytes: 254, t-253
         return bytes([254, t - 253])
 
     def _encode_marker_raw(self) -> bytes:
@@ -928,6 +896,10 @@ class PAQJPCompressor:
         return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
 
     def _decode_header(self, data: bytes):
+        """
+        Returns (header_length_in_bytes, transform_sequence_tuple).
+        Empty sequence means raw.
+        """
         if len(data) < 1:
             return 0, ()
         f = data[0]
@@ -947,7 +919,7 @@ class PAQJPCompressor:
             if len(data) < 2:
                 return 0, ()
             x = data[1]
-            if x > 3:
+            if x > 2:   # only 0,1,2 are valid (253,254,255)
                 return 0, ()
             return 2, (253 + x,)
         else:
@@ -958,7 +930,6 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, ultra: bool = True) -> bytes:
         if not data:
-            # empty input: raw is fine
             backend = self._compress_backend(b'')
             return self._encode_marker_raw() + backend
 
@@ -978,8 +949,8 @@ class PAQJPCompressor:
         # raw (no transform)
         try_candidate(self._encode_marker_raw(), data)
 
-        # single transforms
-        for t in range(1, 257):
+        # single transforms (1‑255; 256 is identity, already covered by raw)
+        for t in range(1, 256):
             try:
                 transformed = self.fwd_transforms[t](data)
                 header = self._encode_marker_single(t)
@@ -987,7 +958,7 @@ class PAQJPCompressor:
             except:
                 continue
 
-        # transform pairs (ultra)
+        # transform pairs (ultra mode only)
         if ultra:
             for t1, t2 in self.sequences:
                 try:
@@ -1010,7 +981,6 @@ class PAQJPCompressor:
         if not payload:
             return b'', None
 
-        # Strict marker‑free decompression
         res = self._decompress_backend(payload)
         if res is None:
             return b'', None
@@ -1025,7 +995,7 @@ class PAQJPCompressor:
         return result, seq
 
     # ------------------------------------------------------------------
-    # Exhaustive self‑test
+    # Exhaustive self‑test (now includes transform 23 with various sizes)
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
@@ -1033,8 +1003,8 @@ class PAQJPCompressor:
         print("=" * 60)
         all_ok = True
 
-        print("Testing all 256 single transforms on all 256 byte values...")
-        for t_num in range(1, 257):
+        print("Testing all 255 single transforms on all 256 byte values...")
+        for t_num in range(1, 256):   # skip 256, it's identity
             for b in range(256):
                 orig = bytes([b])
                 try:
@@ -1049,7 +1019,7 @@ class PAQJPCompressor:
                     all_ok = False
                     break
             else:
-                if t_num % 32 == 0 or t_num == 256:
+                if t_num % 32 == 0 or t_num == 255:
                     print(f"  PASS: transforms 1..{t_num} OK")
             if not all_ok:
                 break
@@ -1081,6 +1051,25 @@ class PAQJPCompressor:
             return False
         print("  PASS: all pairs OK")
 
+        # Test transform 23 with larger sizes to ensure fixed header works
+        print("\nTesting transform 23 with files up to 10000 bytes...")
+        for size in [0, 1, 100, 1000, 5000, 8192, 10000]:
+            rng = random.Random(12345 + size)
+            orig = bytes(rng.randint(0, 255) for _ in range(size))
+            try:
+                enc = self.fwd_transforms[23](orig)
+                dec = self.rev_transforms[23](enc)
+                if dec != orig:
+                    print(f"  FAIL: transform 23 on size {size}")
+                    all_ok = False
+                    break
+            except Exception as e:
+                print(f"  FAIL: transform 23 on size {size} raised {e}")
+                all_ok = False
+                break
+        else:
+            print("  PASS: transform 23 OK for all tested sizes")
+
         print("\nTesting random 1000‑byte block full pipeline...")
         rng = random.Random(12345)
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
@@ -1093,7 +1082,7 @@ class PAQJPCompressor:
                 return False
             print("  PASS: random data pipeline OK")
         except RuntimeError as e:
-            print(f"  Could not compress random data marker‑free (this is extremely rare): {e}")
+            print(f"  Could not compress random data marker‑free: {e}")
             return False
 
         print("\nTesting empty input...")
@@ -1155,7 +1144,7 @@ class PAQJPCompressor:
 # ------------------------------------------------------------
 def main():
     print(f"{PROGNAME}")
-    print("256 single transforms + 2704 transform‑pair sequences (100% lossless).")
+    print("255 single transforms + 2704 transform‑pair sequences (100% lossless).")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Data will be stored raw.")
 
@@ -1165,7 +1154,7 @@ def main():
     if choice == "1":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
-        mode = input("Choose mode:\n  1) Fast     (256 transforms)\n  2) Ultra    (256 + 2704 pairs)\n> ").strip()
+        mode = input("Choose mode:\n  1) Fast     (255 transforms)\n  2) Ultra    (255 + 2704 pairs)\n> ").strip()
         ultra = True if mode == "2" else False
         c.compress_file(i, o, ultra=ultra)
     elif choice == "2":
