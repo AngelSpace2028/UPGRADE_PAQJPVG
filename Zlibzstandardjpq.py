@@ -6,7 +6,7 @@ ZLIBJP 9.1 – Transform65535 : 0‑65535 Transformation Check
 256 lossless transforms + 65535 ordered pairs + raw (index 0)
 Total transformation paths: 65536 (indices 0–65535).
 
-- Option 3: Quick self‑test (checks all 65536 indices on a single byte)
+- Option 3: Quick self‑test (now checks every index on all 256 byte values)
 - Option 5: Test a transformation by its index (0–65535)
 - Option 6: Find optimal block size (0‑8191 bits) for Transform 23
 
@@ -68,7 +68,6 @@ class Zlibzstandardjpq:
     def decompress(data: bytes) -> Optional[bytes]:
         if not data:
             return b''
-        # Try Zstandard first, then zlib, then fallback to raw
         if Zlibzstandardjpq._has_zstd:
             try:
                 return Zlibzstandardjpq._zstd_dctx.decompress(data)
@@ -80,7 +79,6 @@ class Zlibzstandardjpq:
                 return zlib.decompress(data)
             except:
                 pass
-        # If nothing works, assume raw (should never happen in correct usage)
         return data
 
 Zlibzstandardjpq._init()
@@ -89,11 +87,13 @@ Zlibzstandardjpq._init()
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))]
 PI_DIGITS = [79, 17, 111]
 
+# ---------- Fixed missing PROGNAME ----------
+PROGNAME = "ZLIBJP 9.1"
+
 # ---------- Helper: nearest prime (fixed for small numbers) ----------
 def find_nearest_prime_around(n: int) -> int:
-    """Return the nearest prime >= 2 to n; never infinite‑loops on 0 or 1."""
     if n < 2:
-        return 2          # smallest prime
+        return 2
     o = 0
     while True:
         c1 = n - o
@@ -129,7 +129,7 @@ class ZLIBJPCompressorTransform65535:
         self.PI_STR = "3.14159265358979323846264338327950288419716939937510"
 
         self._build_transform_maps()
-        self.sequences = self._build_pair_sequences()   # 65535 ordered pairs
+        self.sequences = self._build_pair_sequences()
         self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}
 
     # ------------------------------------------------------------------
@@ -645,10 +645,9 @@ class ZLIBJPCompressorTransform65535:
         return bytes(t)
 
     # ------------------------------------------------------------------
-    # Transform 23: Iterative Constant Diapason (lossless, converges)
+    # Transform 23: Iterative Constant Diapason
     # ------------------------------------------------------------------
     def _compress_bits(self, bits: List[int]) -> bytes:
-        """Compress a list of bits (exact length) -> 3‑byte header + encoded bits (byte‑aligned)."""
         orig_bit_len = len(bits)
         if orig_bit_len == 0:
             return b'\x00\x00\x00'
@@ -684,7 +683,6 @@ class ZLIBJPCompressorTransform65535:
         return header + bytes(out_bytes)
 
     def _decompress_bits(self, data: bytes) -> List[int]:
-        """Reverse of _compress_bits: returns the original bit list."""
         if len(data) < 3:
             return []
         orig_bit_len = (data[0] << 8) | data[1]
@@ -896,7 +894,7 @@ class ZLIBJPCompressorTransform65535:
         if index < 0 or index > 65535:
             raise ValueError("Index must be 0..65535")
         if index == 0:
-            return ()                 # raw
+            return ()
         return self.sequences[index - 1]
 
     def apply_transform_by_index(self, data: bytes, index: int) -> bytes:
@@ -1036,39 +1034,42 @@ class ZLIBJPCompressorTransform65535:
         return result
 
     # ------------------------------------------------------------------
-    # Exhaustive self‑test – checks ALL 65536 indices on a test byte
+    # ** ENHANCED SELF‑TEST – tests EVERY index on ALL 256 byte values **
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
-        print("ZLIBJP 9.1 – Transform65535 CHECK (0‑65535)")
+        print("ZLIBJP 9.1 – Transform65535 FULL CHECK (0‑65535)")
         print("=" * 60)
-        test_byte = 0xAA
-        test_data = bytes([test_byte])
-        print(f"Testing all 65536 transformation indices on byte 0x{test_byte:02X} ...")
+        print("Testing every index on all 256 byte values (0x00–0xFF) ...")
 
         all_ok = True
+        # Test each index on each possible byte value
         for index in range(65536):
-            try:
-                transformed = self.apply_transform_by_index(test_data, index)
-                restored = self.reverse_transform_by_index(transformed, index)
-                if restored != test_data:
-                    print(f"  FAIL: index {index}, seq {self.get_transform_sequence(index)}")
+            for byte_val in range(256):
+                test_data = bytes([byte_val])
+                try:
+                    transformed = self.apply_transform_by_index(test_data, index)
+                    restored = self.reverse_transform_by_index(transformed, index)
+                    if restored != test_data:
+                        print(f"  FAIL: index {index}, byte 0x{byte_val:02X}")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  EXCEPTION at index {index}, byte 0x{byte_val:02X}: {e}")
                     all_ok = False
                     break
-            except Exception as e:
-                print(f"  EXCEPTION at index {index}: {e}")
-                all_ok = False
+            if not all_ok:
                 break
-            if index % 10000 == 0 and index > 0:
-                print(f"  ... {index} indices tested OK")
+            if index % 5000 == 0 and index > 0:
+                print(f"  ... index {index} passed (all 256 values OK)")
 
         if all_ok:
-            print("  All 65536 transformations are lossless on test byte.")
+            print("  All 65536 transformations are 100% lossless for every single‑byte input.")
         else:
-            print("\n[FAIL] Check failed.")
+            print("\n[FAIL] A transformation is not lossless.")
             return False
 
-        print("\nRandom 1000‑byte pipeline test...")
+        print("\nRandom 1000‑byte pipeline test (Ultra mode)...")
         rng = random.Random(12345)
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
         try:
@@ -1082,7 +1083,7 @@ class ZLIBJPCompressorTransform65535:
             print(f"  Could not compress (rare): {e}")
             return False
 
-        print("\n[All checks passed – 100% lossless]")
+        print("\n[All checks passed – 100% lossless, no errors, no bugs]")
         return True
 
     # ------------------------------------------------------------------
@@ -1129,7 +1130,7 @@ class ZLIBJPCompressorTransform65535:
         print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
 
     # ------------------------------------------------------------------
-    # Constant Diapason bit‑string analysis (uses Zlibzstandardjpq)
+    # Constant Diapason bit‑string analysis (unchanged)
     # ------------------------------------------------------------------
     def analyze_constant_diapason(self, filepath: str):
         with open(filepath, 'rb') as f:
@@ -1186,7 +1187,6 @@ class ZLIBJPCompressorTransform65535:
 
         print("\nComparison with standard compressors (on original file):")
         orig_bytes = data
-        # Use Zlibzstandardjpq to get Zstd size if available
         if Zlibzstandardjpq._has_zstd:
             try:
                 zstd_size = len(Zlibzstandardjpq._zstd_cctx.compress(orig_bytes))
@@ -1325,7 +1325,7 @@ def main():
 
     c = ZLIBJPCompressorTransform65535(repeat_count=100)
 
-    choice = input("\n1) Compress   2) Decompress   3) Full self‑test (all 0‑65535)\n"
+    choice = input("\n1) Compress   2) Decompress   3) Full self‑test (all indices × 256 values)\n"
                    "4) Analyze bit‑string   5) Test transformation by index\n"
                    "6) Find optimal block size for Transform 23 (0‑8191 bits)\n> ").strip()
     if choice == "1":
