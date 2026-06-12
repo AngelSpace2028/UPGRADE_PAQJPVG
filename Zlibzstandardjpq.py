@@ -12,6 +12,8 @@ Total transformation paths: 65536 (indices 0–65535).
 
 Usage:
     python zlibjp91_transform65535_check.py
+
+Backend: Zlibzstandardjpq (internal best‑of‑zlib‑9 + Zstandard)
 """
 
 import math
@@ -19,21 +21,69 @@ import random
 import decimal
 from typing import Optional, List, Tuple, Dict, Callable
 
-# ---------- Optional compression backends ----------
-try:
-    import zlib
-except ImportError:
-    zlib = None
+# ---------- Custom combined backend ----------
+class Zlibzstandardjpq:
+    """Tries zlib level 9 and Zstandard –22, picks the smallest result."""
+    _has_zlib = False
+    _has_zstd = False
+    _zstd_cctx = None
+    _zstd_dctx = None
 
-try:
-    import zstandard as zstd
-    zstd_cctx = zstd.ZstdCompressor(level=22)
-    zstd_dctx = zstd.ZstdDecompressor()
-    HAS_ZSTD = True
-except ImportError:
-    HAS_ZSTD = False
+    @staticmethod
+    def _init():
+        try:
+            import zlib
+            Zlibzstandardjpq._has_zlib = True
+        except ImportError:
+            pass
+        try:
+            import zstandard as zstd
+            Zlibzstandardjpq._zstd_cctx = zstd.ZstdCompressor(level=22)
+            Zlibzstandardjpq._zstd_dctx = zstd.ZstdDecompressor()
+            Zlibzstandardjpq._has_zstd = True
+        except ImportError:
+            pass
 
-PROGNAME = "ZLIBJP_9.1_Transform65535_Check"
+    @staticmethod
+    def compress(data: bytes) -> bytes:
+        if not Zlibzstandardjpq._has_zlib and not Zlibzstandardjpq._has_zstd:
+            return data
+        candidates = []
+        if Zlibzstandardjpq._has_zstd:
+            try:
+                candidates.append(Zlibzstandardjpq._zstd_cctx.compress(data))
+            except:
+                pass
+        if Zlibzstandardjpq._has_zlib:
+            import zlib
+            try:
+                candidates.append(zlib.compress(data, 9))
+            except:
+                pass
+        if not candidates:
+            return data
+        return min(candidates, key=len)
+
+    @staticmethod
+    def decompress(data: bytes) -> Optional[bytes]:
+        if not data:
+            return b''
+        # Try Zstandard first, then zlib, then fallback to raw
+        if Zlibzstandardjpq._has_zstd:
+            try:
+                return Zlibzstandardjpq._zstd_dctx.decompress(data)
+            except:
+                pass
+        if Zlibzstandardjpq._has_zlib:
+            import zlib
+            try:
+                return zlib.decompress(data)
+            except:
+                pass
+        # If nothing works, assume raw (should never happen in correct usage)
+        return data
+
+Zlibzstandardjpq._init()
 
 # ---------- Constants ----------
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))]
@@ -868,37 +918,13 @@ class ZLIBJPCompressorTransform65535:
         return result
 
     # ------------------------------------------------------------------
-    # Compression backends – strictly marker‑free
+    # Compression backend – now exclusively Zlibzstandardjpq
     # ------------------------------------------------------------------
     def _compress_backend(self, data: bytes) -> bytes:
-        candidates = []
-        if HAS_ZSTD:
-            try:
-                candidates.append(zstd_cctx.compress(data))
-            except:
-                pass
-        if zlib is not None:
-            try:
-                candidates.append(zlib.compress(data))
-            except:
-                pass
-        candidates.append(data)
-        return min(candidates, key=len)
+        return Zlibzstandardjpq.compress(data)
 
     def _decompress_backend(self, data: bytes) -> Optional[bytes]:
-        if len(data) == 0:
-            return b''
-        if HAS_ZSTD:
-            try:
-                return zstd_dctx.decompress(data)
-            except:
-                pass
-        if zlib is not None:
-            try:
-                return zlib.decompress(data)
-            except:
-                pass
-        return data
+        return Zlibzstandardjpq.decompress(data)
 
     # ------------------------------------------------------------------
     # Variable‑length header encoding / decoding
@@ -1103,7 +1129,7 @@ class ZLIBJPCompressorTransform65535:
         print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
 
     # ------------------------------------------------------------------
-    # Constant Diapason bit‑string analysis
+    # Constant Diapason bit‑string analysis (uses Zlibzstandardjpq)
     # ------------------------------------------------------------------
     def analyze_constant_diapason(self, filepath: str):
         with open(filepath, 'rb') as f:
@@ -1160,18 +1186,20 @@ class ZLIBJPCompressorTransform65535:
 
         print("\nComparison with standard compressors (on original file):")
         orig_bytes = data
-        if HAS_ZSTD:
+        # Use Zlibzstandardjpq to get Zstd size if available
+        if Zlibzstandardjpq._has_zstd:
             try:
-                zstd_bytes = zstd_cctx.compress(orig_bytes)
-                print(f"  Zstandard –22: {len(zstd_bytes)} bytes")
+                zstd_size = len(Zlibzstandardjpq._zstd_cctx.compress(orig_bytes))
+                print(f"  Zstandard –22: {zstd_size} bytes")
             except:
                 print("  Zstandard –22: error")
         else:
             print("  Zstandard not available.")
-        if zlib is not None:
+        if Zlibzstandardjpq._has_zlib:
+            import zlib
             try:
-                zlib_bytes = zlib.compress(orig_bytes)
-                print(f"  ZLIB: {len(zlib_bytes)} bytes")
+                zlib_size = len(zlib.compress(orig_bytes, 9))
+                print(f"  ZLIB: {zlib_size} bytes")
             except:
                 print("  ZLIB: error")
         else:
@@ -1182,10 +1210,6 @@ class ZLIBJPCompressorTransform65535:
     # Block‑wise Transform 23 (0 … 8191 bits per block)
     # ------------------------------------------------------------------
     def transform_23_blocks_compress(self, data: bytes, block_bits: int) -> bytes:
-        """
-        Apply Transform 23 to independent blocks of exactly `block_bits` bits.
-        block_bits = 0  → whole file as a single block (original transform_23).
-        """
         if not data:
             return self.transform_23(data)
 
@@ -1297,8 +1321,7 @@ class ZLIBJPCompressorTransform65535:
 def main():
     print(f"{PROGNAME}")
     print("ZLIBJP 9.1 – 256 single + 65535 pairs = 65536 transform paths (indices 0‑65535)")
-    if zlib is None and not HAS_ZSTD:
-        print("Warning: No backend compressor found – raw data will be stored.")
+    print("Backend: Zlibzstandardjpq (best of zlib‑9 + Zstandard –22)")
 
     c = ZLIBJPCompressorTransform65535(repeat_count=100)
 
