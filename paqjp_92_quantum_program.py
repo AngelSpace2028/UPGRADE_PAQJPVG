@@ -1,5 +1,5 @@
-#!/usr/bin/env python3                                                  # Unix shebang
-# -*- coding: utf-8 -*-                                                 # Source encoding
+#!/usr/bin/env python3                                                  # Shebang: run with Python 3 interpreter
+# -*- coding: utf-8 -*-                                                 # Encoding declaration: UTF-8
 """
 PAQJP 9.2 – Transform65535 : 0‑65535 Transformation Check
 ==========================================================
@@ -24,68 +24,68 @@ Base transforms (1..256):
   47     : PAQ state table minus 400 XOR
   48‑255 : dynamic (XOR with seed)
   256    : identity
-"""                                                                    # Architecture description
+"""                                                                    # Docstring: explains the architecture and transform mapping
 
-import math                                                            # Mathematical functions
-import random                                                          # Random number generation
-import decimal                                                         # High‑precision decimal arithmetic
-import hashlib                                                         # SHA‑256 for block‑specific key
-import base64                                                          # Base64 encode/decode
-import heapq                                                           # Priority queue for Huffman
-from typing import Optional, List, Tuple, Dict, Callable               # Type hints
+import math                                                            # Import math for ceil, sqrt, etc.
+import random                                                          # Import random for PRNG
+import decimal                                                         # Import decimal for high‑precision arithmetic
+import hashlib                                                         # Import hashlib for SHA‑256
+import base64                                                          # Import base64 for Base64 encoding/decoding
+import heapq                                                           # Import heapq for priority queue (Huffman)
+from typing import Optional, List, Tuple, Dict, Callable               # Import type hints
 
 # ---------- Optional compression backends ----------
 try:
-    import paq                                                        # Try loading PAQ
+    import paq                                                        # Try to import the PAQ compressor library
 except ImportError:
-    paq = None                                                         # Not available
+    paq = None                                                         # Set to None if not installed
 
 try:
-    import zstandard as zstd                                           # Try loading Zstandard
-    zstd_cctx = zstd.ZstdCompressor(level=22)                          # Zstd compressor (level 22)
-    zstd_dctx = zstd.ZstdDecompressor()                                # Zstd decompressor
-    HAS_ZSTD = True                                                    # Flag: Zstd ready
+    import zstandard as zstd                                           # Try to import Zstandard compressor
+    zstd_cctx = zstd.ZstdCompressor(level=22)                          # Create a Zstd compressor at level 22
+    zstd_dctx = zstd.ZstdDecompressor()                                # Create a Zstd decompressor
+    HAS_ZSTD = True                                                    # Set flag if Zstd is available
 except ImportError:
-    HAS_ZSTD = False                                                   # Zstd not present
+    HAS_ZSTD = False                                                   # Zstd not available
 
-PROGNAME = "PAQJP_9.2_Transform65535_Check"                           # Program name
+PROGNAME = "PAQJP_9.2_Transform65535_Check"                           # Program name constant
 
 # ---------- Constants ----------
-PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))]  # All primes < 256
-PI_DIGITS = [79, 17, 111]                                              # Custom Pi‑digit triple
+PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))]  # List of primes < 256
+PI_DIGITS = [79, 17, 111]                                              # Custom Pi‑digit sequence for some transforms
 
 # ---------- Helper: nearest prime ----------
-def find_nearest_prime_around(n: int) -> int:                          # Find the prime nearest to n
-    if n < 2:                                                          # If too small
+def find_nearest_prime_around(n: int) -> int:                          # Function to find the nearest prime to n
+    if n < 2:                                                          # If n is less than 2
         return 2                                                       # Return the smallest prime
-    o = 0                                                              # Offset from n
-    while True:                                                        # Search outward
-        c1 = n - o                                                     # Candidate below
-        c2 = n + o                                                     # Candidate above
-        if c1 >= 2 and all(c1 % d != 0 for d in range(2, int(c1 ** 0.5) + 1)):  # c1 prime?
-            return c1
-        if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2 ** 0.5) + 1)):  # c2 prime?
-            return c2
+    o = 0                                                              # Start offset at 0
+    while True:                                                        # Infinite loop: search outward
+        c1 = n - o                                                     # Candidate below n
+        c2 = n + o                                                     # Candidate above n
+        if c1 >= 2 and all(c1 % d != 0 for d in range(2, int(c1 ** 0.5) + 1)):  # Check if c1 is prime
+            return c1                                                  # Return it if so
+        if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2 ** 0.5) + 1)):  # Check if c2 is prime
+            return c2                                                  # Return it if so
         o += 1                                                         # Increase search radius
 
 # ---------- Prefix‑free nibble code for transform 23 ----------
-_CONST_DIAPASON_ITER_CODE = [                                          # Variable‑length nibble encoding table
-    (2, 0b10), (2, 0b11),
-    (3, 0b010), (3, 0b011),
-    (4, 0b0010), (4, 0b0011),
-    (5, 0b00010), (5, 0b00011),
-    (6, 0b000010), (6, 0b000011),
-    (7, 0b0000010), (7, 0b0000011),
-    (8, 0b00000010), (8, 0b00000011),
-    (9, 0b000000010), (9, 0b000000011),
+_CONST_DIAPASON_ITER_CODE = [                                          # List of (bit length, code word) for nibble encoding
+    (2, 0b10), (2, 0b11),                                              # Nibble 0: length 2, code 10; nibble 1: length 2, code 11
+    (3, 0b010), (3, 0b011),                                            # Nibble 2: length 3, code 010; nibble 3: length 3, code 011
+    (4, 0b0010), (4, 0b0011),                                          # Nibble 4: length 4, code 0010; nibble 5: length 4, code 0011
+    (5, 0b00010), (5, 0b00011),                                        # Nibble 6: length 5, code 00010; nibble 7: length 5, code 00011
+    (6, 0b000010), (6, 0b000011),                                      # Nibble 8: length 6, code 000010; nibble 9: length 6, code 000011
+    (7, 0b0000010), (7, 0b0000011),                                    # Nibble 10: length 7, code 0000010; nibble 11: length 7, code 0000011
+    (8, 0b00000010), (8, 0b00000011),                                  # Nibble 12: length 8, code 00000010; nibble 13: length 8, code 00000011
+    (9, 0b000000010), (9, 0b000000011),                                # Nibble 14: length 9, code 000000010; nibble 15: length 9, code 000000011
 ]
-_CONST_DIAPASON_ITER_DECODE = {}                                       # Reverse lookup (length, code) → nibble
-for nibble, (length, bits) in enumerate(_CONST_DIAPASON_ITER_CODE):
-    _CONST_DIAPASON_ITER_DECODE[(length, bits)] = nibble
+_CONST_DIAPASON_ITER_DECODE = {}                                       # Decoding dictionary: (length, code) -> nibble value
+for nibble, (length, bits) in enumerate(_CONST_DIAPASON_ITER_CODE):    # For each nibble and its (length, bits)
+    _CONST_DIAPASON_ITER_DECODE[(length, bits)] = nibble               # Map the (length, code) pair back to nibble
 
 # ---------- Original PAQ state table (kept for Transform 47) ----------
-class _PAQStateTable:                                                   # PAQ state table constants
-    table = [
+class _PAQStateTable:                                                   # Class to hold the original PAQ state table
+    table = [                                                           # The state table as list of [next_if_zero, next_if_one, ...]
         [1,2,1,0], [3,5,0,1], [4,6,2,0], [7,10,0,2],
         [8,12,3,0], [9,13,1,1], [11,14,0,3], [15,19,4,0],
         [16,23,2,1], [17,24,2,1], [18,25,2,1], [20,27,1,2],
@@ -121,213 +121,212 @@ class _PAQStateTable:                                                   # PAQ st
     ]
 
 # ---------- Main Compressor Class ----------
-class PAQJPCompressorTransform65535:                                    # Core compressor engine
-    def __init__(self, repeat_count: int = 100):                       # Initialize with configurable repeat count
+class PAQJPCompressorTransform65535:                                    # Main class containing all transforms and compression logic
+    def __init__(self, repeat_count: int = 100):                       # Constructor: set the number of repeat passes for some transforms
         self.repeat_count = repeat_count                                # Store repeat count
-        self.PI_DIGITS = PI_DIGITS.copy()                               # Local copy of PI_DIGITS
-        self.seed_tables = self._gen_seed_tables(num=126, size=40, seed=42)  # Generate 126 seed tables
-        self.fibonacci = self._gen_fib(100)                             # First 100 Fibonacci numbers
-        self.PI_STR = "3.14159265358979323846264338327950288419716939937510"  # High‑precision Pi string
+        self.PI_DIGITS = PI_DIGITS.copy()                               # Copy the global PI_DIGITS list
+        self.seed_tables = self._gen_seed_tables(num=126, size=40, seed=42)  # Generate 126 random seed tables (40 bytes each)
+        self.fibonacci = self._gen_fib(100)                             # Generate the first 100 Fibonacci numbers
+        self.PI_STR = "3.14159265358979323846264338327950288419716939937510"  # Pi string with high precision
 
-        # Build modified state table for Transform 47 (each value minus 400, mod 256)
-        self.mod_state_table = []                                       # Modified PAQ table
-        for row in _PAQStateTable.table:
-            new_row = [(val - 400) & 0xFF for val in row]              # Subtract 400, keep byte
-            self.mod_state_table.append(new_row)                        # Append
+        # Build modified state table for Transform 47 (minus 400)
+        self.mod_state_table = []                                       # List to hold the modified PAQ state table
+        for row in _PAQStateTable.table:                                # For each row in the original table
+            new_row = [(val - 400) & 0xFF for val in row]               # Subtract 400 and mask to a byte
+            self.mod_state_table.append(new_row)                        # Append the modified row
 
-        self._build_transform_maps()                                    # Register all forward/backward transforms
-        self.sequences = self._build_pair_sequences()                   # All 65535 ordered pairs
-        self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}  # Index→pair map
+        self._build_transform_maps()                                    # Build the dictionaries mapping index -> callable
+        self.sequences = self._build_pair_sequences()                   # Generate all 65535 ordered pairs
+        self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}  # Index -> pair lookup
 
-        # Pre‑build mask for transform 46
-        self._build_mask_46()
+        # Mask for transform 46
+        self._build_mask_46()                                           # Build the XOR mask for transform 46
 
-    def _build_mask_46(self):                                           # Build mask for transform 46 (power‑of‑2/3/6 minus 10)
-        base = [1, 2, 4, 8, 16, 32, 64, 128, 3, 6]                    # Base values
-        minus_ten = [(b - 10) & 0xFF for b in base]                    # (base - 10) mod 256
-        self.mask_46 = minus_ten * 10                                   # Repeat 10 times → 100 bytes
+    def _build_mask_46(self):                                           # Build the mask for transform 46 (power‑of‑2/3/6 minus 10 repeated)
+        base = [1, 2, 4, 8, 16, 32, 64, 128, 3, 6]                    # The base values: powers of 2, 3, 6
+        minus_ten = [(b - 10) & 0xFF for b in base]                    # Subtract 10 modulo 256
+        self.mask_46 = minus_ten * 10                                   # Repeat the list 10 times → 100 bytes total
 
     # ------------------------------------------------------------------
     # pi / constant helpers
     # ------------------------------------------------------------------
-    def get_pi_digits(self, n: int) -> str:                             # Return n digits of π after the decimal point
-        if n < 1: return ""
-        return self.PI_STR[2:2 + n]
+    def get_pi_digits(self, n: int) -> str:                             # Return n digits of Pi after the decimal point
+        if n < 1: return ""                                             # Return empty if n < 1
+        return self.PI_STR[2:2 + n]                                     # Slice from position 2 (skip "3.")
 
-    def find_lossless_k(self, n: int):                                  # Find k for transform 17 such that reconstruction is exact
-        if n < 1: return 0, True
-        true_digits = self.get_pi_digits(n)
-        true_scaled = int(self.PI_STR.replace('.', '')[:n + 1])
-        DENOM = 16777216
-        decimal.getcontext().prec = 50
-        pi_dec = decimal.Decimal(self.PI_STR)
-        k_float = (pi_dec - 3) * DENOM
-        k_candidate = int(round(k_float))
-        k_candidate = max(0, min(k_candidate, DENOM - 1))
-        approx_scaled = (3 * 10 ** n * DENOM + k_candidate * 10 ** n) // DENOM
-        return k_candidate, approx_scaled == true_scaled
+    def find_lossless_k(self, n: int):                                  # Find k for transform 17 such that Pi reconstruction is exact
+        if n < 1: return 0, True                                        # Trivial case
+        true_digits = self.get_pi_digits(n)                             # The true first n digits after decimal
+        true_scaled = int(self.PI_STR.replace('.', '')[:n + 1])        # Integer representation: 314159… (n+1 digits)
+        DENOM = 16777216                                                # Fixed denominator
+        decimal.getcontext().prec = 50                                  # Set decimal precision to 50 places
+        pi_dec = decimal.Decimal(self.PI_STR)                           # Decimal Pi
+        k_float = (pi_dec - 3) * DENOM                                  # k = (Pi - 3) * DENOM
+        k_candidate = int(round(k_float))                               # Round to nearest integer
+        k_candidate = max(0, min(k_candidate, DENOM - 1))               # Clamp to [0, DENOM-1]
+        approx_scaled = (3 * 10 ** n * DENOM + k_candidate * 10 ** n) // DENOM  # Compute the integer approximation
+        return k_candidate, approx_scaled == true_scaled                # Return k and whether it's lossless
 
     def to_bin(self, value: int, bits: int) -> str:                     # Convert integer to binary string with leading zeros
         return format(value, 'b').zfill(bits)
 
-    def get_bit_size(self, k: int) -> int:                              # Number of bits needed to encode k in transform 17
-        return 23 if k <= 0x7FFFFF else 25
+    def get_bit_size(self, k: int) -> int:                              # Return number of bits needed to store k in transform 17
+        return 23 if k <= 0x7FFFFF else 25                              # 23 bits if k fits in 23 bits, else 25
 
-    def transform_17(self, data: bytes) -> bytes:                       # XOR with Pi‑derived mask (transform 17)
-        if not data: return b''
-        k, _ = self.find_lossless_k(7)
-        bits_used = self.get_bit_size(k)
-        bit_str = self.to_bin(k, bits_used)
-        mask_bytes = []
-        for i in range(0, len(bit_str), 8):
-            byte_bits = bit_str[i:i + 8]
-            if len(byte_bits) < 8:
+    def transform_17(self, data: bytes) -> bytes:                       # Transform 17: XOR with Pi‑derived mask
+        if not data: return b''                                         # Empty input → empty output
+        k, _ = self.find_lossless_k(7)                                  # Get k for 7 digits (lossless check not used)
+        bits_used = self.get_bit_size(k)                                # Determine bit width
+        bit_str = self.to_bin(k, bits_used)                             # Binary representation of k
+        mask_bytes = []                                                 # Build mask bytes from binary string
+        for i in range(0, len(bit_str), 8):                             # Process 8 bits at a time
+            byte_bits = bit_str[i:i + 8]                                # Slice of up to 8 bits
+            if len(byte_bits) < 8:                                      # Pad with zeros if incomplete
                 byte_bits = byte_bits.ljust(8, '0')
-            mask_bytes.append(int(byte_bits, 2))
-        mask = bytes(mask_bytes)
-        t = bytearray(data)
-        for i in range(len(t)):
-            t[i] ^= mask[i % len(mask)]
-        return bytes(t)
-    reverse_transform_17 = transform_17                                 # XOR is self‑inverse
+            mask_bytes.append(int(byte_bits, 2))                        # Convert to integer and append
+        mask = bytes(mask_bytes)                                        # Mask as bytes
+        t = bytearray(data)                                             # Mutable copy of data
+        for i in range(len(t)):                                         # For each byte
+            t[i] ^= mask[i % len(mask)]                                 # XOR with corresponding mask byte (cyclic)
+        return bytes(t)                                                 # Return transformed data
+    reverse_transform_17 = transform_17                                 # XOR is self‑inverse; reverse is identical
 
-    def get_basel_digits(self, n: int) -> str:                          # n digits of π²/6
-        decimal.getcontext().prec = n + 5
-        pi = decimal.Decimal(self.PI_STR)
-        basel = (pi * pi) / decimal.Decimal(6)
-        s = str(basel).replace('.', '')
-        return s[:n]
+    def get_basel_digits(self, n: int) -> str:                          # Return n digits of Basel constant (π²/6)
+        decimal.getcontext().prec = n + 5                               # Set precision
+        pi = decimal.Decimal(self.PI_STR)                               # Decimal Pi
+        basel = (pi * pi) / decimal.Decimal(6)                         # π²/6
+        s = str(basel).replace('.', '')                                 # Remove decimal point
+        return s[:n]                                                    # Return first n digits
 
-    def get_one_over_e_digits(self, n: int) -> str:                     # n digits of 1/e
-        decimal.getcontext().prec = n + 5
-        e = decimal.Decimal(1).exp()
-        inv_e = decimal.Decimal(1) / e
-        s = str(inv_e).replace('.', '')
-        return s[:n]
+    def get_one_over_e_digits(self, n: int) -> str:                     # Return n digits of 1/e
+        decimal.getcontext().prec = n + 5                               # Set precision
+        e = decimal.Decimal(1).exp()                                    # e = exp(1)
+        inv_e = decimal.Decimal(1) / e                                  # 1/e
+        s = str(inv_e).replace('.', '')                                 # Remove decimal point
+        return s[:n]                                                    # Return first n digits
 
-    def get_5e_digits(self, n: int) -> str:                             # n digits of 5e
-        decimal.getcontext().prec = n + 5
-        e = decimal.Decimal(1).exp()
-        five_e = decimal.Decimal(5) * e
-        s = str(five_e).replace('.', '')
-        return s[:n]
+    def get_5e_digits(self, n: int) -> str:                             # Return n digits of 5e
+        decimal.getcontext().prec = n + 5                               # Set precision
+        e = decimal.Decimal(1).exp()                                    # e
+        five_e = decimal.Decimal(5) * e                                 # 5e
+        s = str(five_e).replace('.', '')                                # Remove decimal point
+        return s[:n]                                                    # Return first n digits
 
     # ------------------------------------------------------------------
     # Seed tables, Fibonacci
     # ------------------------------------------------------------------
-    def _gen_seed_tables(self, num=126, size=40, seed=42):              # Generate list of random seed tables
-        random.seed(seed)
-        return [[random.randint(5, 255) for _ in range(size)] for _ in range(num)]
+    def _gen_seed_tables(self, num=126, size=40, seed=42):              # Generate a list of random seed tables
+        random.seed(seed)                                               # Seed RNG for reproducibility
+        return [[random.randint(5, 255) for _ in range(size)] for _ in range(num)]  # Create num lists of size random bytes
 
     def _gen_fib(self, n):                                              # Generate first n Fibonacci numbers
-        a, b = 0, 1
-        res = [a, b]
-        for _ in range(2, n):
-            a, b = b, a + b
-            res.append(b)
-        return res
+        a, b = 0, 1                                                     # Initial values
+        res = [a, b]                                                    # Start list with 0 and 1
+        for _ in range(2, n):                                           # Generate remaining numbers
+            a, b = b, a + b                                             # Update Fibonacci recurrence
+            res.append(b)                                               # Append the new number
+        return res                                                      # Return the list
 
-    def get_seed(self, idx: int, val: int) -> int:                      # Retrieve a seed byte from seed_tables
-        if 0 <= idx < len(self.seed_tables):
-            return self.seed_tables[idx][val % 40]
-        return 0
+    def get_seed(self, idx: int, val: int) -> int:                      # Get a seed byte from seed_tables for a given transform index
+        if 0 <= idx < len(self.seed_tables):                            # If idx is within bounds
+            return self.seed_tables[idx][val % 40]                      # Return seed[idx][val mod 40]
+        return 0                                                        # Default to 0 if out of range
 
     # ------------------------------------------------------------------
     # Bit helpers
     # ------------------------------------------------------------------
     def _append_bits(self, bitlist: List[int], value: int, count: int): # Append `count` bits of `value` to bitlist (MSB first)
-        for i in range(count - 1, -1, -1):
-            bitlist.append((value >> i) & 1)
+        for i in range(count - 1, -1, -1):                              # Loop from most significant bit to least
+            bitlist.append((value >> i) & 1)                            # Extract bit i and append
 
-    def _read_bits(self, bits: List[int], pos: int, count: int) -> int:  # Read `count` bits starting at `pos`, return integer
-        val = 0
-        for i in range(count):
-            if pos + i >= len(bits):
-                return 0
-            val = (val << 1) | bits[pos + i]
-        return val
+    def _read_bits(self, bits: List[int], pos: int, count: int) -> int:  # Read `count` bits from bitlist at position pos, return as integer
+        val = 0                                                         # Accumulator
+        for i in range(count):                                          # For each bit
+            if pos + i >= len(bits): return 0                           # If beyond list, return 0 (padding)
+            val = (val << 1) | bits[pos + i]                            # Shift left and add the bit
+        return val                                                      # Return the integer value
 
     # ------------------------------------------------------------------
     # RLE transform 00 (index 1)
     # ------------------------------------------------------------------
-    def transform_00(self, data: bytes) -> bytes:                       # Advanced RLE with shift optimisation (Transform 1)
-        if not data: return b'\x00'
-        best_result = None
-        best_length = float('inf')
-        best_shifts = []
-        MAX_PASSES = 10
-        current = bytearray(data)
-        applied_shifts = []
-        for _ in range(MAX_PASSES):
-            best_shift = 0
-            best_shifted = current
-            best_score = float('-inf')
-            for shift in range(256):                                    # Test all 256 additive shifts
-                tmp = bytearray(current)
-                for j in range(len(tmp)):
+    def transform_00(self, data: bytes) -> bytes:                       # Transform 1: Advanced RLE with additive shift optimization
+        if not data: return b'\x00'                                     # Empty input → single zero byte
+        best_result = None                                              # Best compressed result so far
+        best_length = float('inf')                                      # Best length (initially infinite)
+        best_shifts = []                                                # Sequence of shifts that gave the best result
+        MAX_PASSES = 10                                                 # Maximum number of shift passes
+        current = bytearray(data)                                       # Working mutable copy
+        applied_shifts = []                                             # Shifts applied in current exploration
+        for _ in range(MAX_PASSES):                                     # Try up to MAX_PASSES shift rounds
+            best_shift = 0                                              # Best shift for this pass
+            best_shifted = current                                      # Best shifted data (initialized to unchanged)
+            best_score = float('-inf')                                  # Best score (maximizing squared run lengths)
+            for shift in range(256):                                    # Try all 256 additive shifts
+                tmp = bytearray(current)                                # Copy for trial
+                for j in range(len(tmp)):                               # Apply shift (add shift mod 256)
                     tmp[j] = (tmp[j] + shift) % 256
-                score = 0
+                score = 0                                               # Score = sum of squared run lengths
                 i = 0
-                while i < len(tmp):                                     # Compute sum of squared run lengths
+                while i < len(tmp):
                     val = tmp[i]
                     run = 1
                     i += 1
-                    while i < len(tmp) and tmp[i] == val:
+                    while i < len(tmp) and tmp[i] == val:              # Count run length
                         run += 1
                         i += 1
                     score += run * run
-                if score > best_score:
+                if score > best_score:                                  # If better score
                     best_score = score
                     best_shifted = tmp
                     best_shift = shift
-            applied_shifts.append(best_shift)
-            rle_encoded = self._apply_rle_to_shifted(best_shifted, best_shift)
-            if len(rle_encoded) < best_length:
+            applied_shifts.append(best_shift)                           # Record the shift
+            rle_encoded = self._apply_rle_to_shifted(best_shifted, best_shift)  # RLE‑encode the shifted data
+            if len(rle_encoded) < best_length:                          # If this encoding is the shortest so far
                 best_length = len(rle_encoded)
                 best_result = rle_encoded
                 best_shifts = applied_shifts.copy()
-            current = best_shifted
-            if len(rle_encoded) >= len(data):                           # Stop if no compression
+            current = best_shifted                                      # Use the shifted data for the next pass
+            if len(rle_encoded) >= len(data):                           # Stop early if no compression
                 break
-        if best_result is None or best_length >= len(data):
-            return bytes([0]) + data                                    # Escape: 0x00 + original data
-        header = bytearray([len(best_shifts)])
-        header.extend(best_shifts)
-        return header + best_result
+        if best_result is None or best_length >= len(data):            # If no improvement
+            return bytes([0]) + data                                    # Escape code: 0x00 followed by original data
+        header = bytearray([len(best_shifts)])                          # Header: count of shifts
+        header.extend(best_shifts)                                      # The shift values
+        return header + best_result                                     # Concatenate header and compressed data
 
-    def _apply_rle_to_shifted(self, shifted_data: bytearray, shift: int) -> bytes:  # Encode shifted data using RLE
-        bits = []
-        self._append_bits(bits, 0b010, 3)                               # Magic marker
-        self._append_bits(bits, shift, 8)                               # Shift value (8 bits)
+    def _apply_rle_to_shifted(self, shifted_data: bytearray, shift: int) -> bytes:  # Encode already‑shifted data with RLE
+        bits = []                                                       # Bit list to build
+        self._append_bits(bits, 0b010, 3)                               # Magic marker 010 (3 bits)
+        self._append_bits(bits, shift, 8)                               # The shift value (8 bits)
         i = 0
         n = len(shifted_data)
-        while i < n:
+        while i < n:                                                    # Process runs
             val = shifted_data[i]
             run = 1
             i += 1
-            while i < n and shifted_data[i] == val:
+            while i < n and shifted_data[i] == val:                     # Find run length
                 run += 1
                 i += 1
-            while run >= 13:                                            # Long run
-                chunk = min(run, 268)
-                self._append_bits(bits, 0b1111, 4)
-                self._append_bits(bits, chunk - 13, 8)
-                self._append_bits(bits, val, 8)
-                run -= chunk
-            if run == 1:                                                # Single byte
+            while run >= 13:                                            # Encode long runs (length >= 13) using 4+8+8 bits
+                chunk = min(run, 268)                                   # Max chunk length 268 (13+255)
+                self._append_bits(bits, 0b1111, 4)                      # Prefix 1111
+                self._append_bits(bits, chunk - 13, 8)                  # Run length - 13 (0‑255)
+                self._append_bits(bits, val, 8)                         # Byte value
+                run -= chunk                                            # Reduce remaining run
+            if run == 1:                                                # Single byte: prefix 00 + 8 bits value
                 self._append_bits(bits, 0b00, 2)
                 self._append_bits(bits, val, 8)
-            elif run <= 5:                                              # Short run 2‑5
+            elif run <= 5:                                              # Short run 2‑5: prefix 01 + 2 bits (run-2) + 8 bits value
                 self._append_bits(bits, 0b01, 2)
                 self._append_bits(bits, run - 2, 2)
                 self._append_bits(bits, val, 8)
-            elif run <= 12:                                             # Medium run 6‑12
+            elif run <= 12:                                             # Medium run 6‑12: prefix 10 + 3 bits (run-6) + 8 bits value
                 self._append_bits(bits, 0b10, 2)
                 self._append_bits(bits, run - 6, 3)
                 self._append_bits(bits, val, 8)
-        pad = (8 - len(bits) % 8) % 8
-        self._append_bits(bits, 0, pad)
-        out = bytearray()
+        pad = (8 - len(bits) % 8) % 8                                   # Padding to a multiple of 8 bits
+        self._append_bits(bits, 0, pad)                                 # Append zero bits
+        out = bytearray()                                               # Convert bits to bytes
         for j in range(0, len(bits), 8):
             byte = 0
             for k in range(8):
@@ -337,87 +336,87 @@ class PAQJPCompressorTransform65535:                                    # Core c
         return bytes(out)
 
     def reverse_transform_00(self, cdata: bytes) -> bytes:             # Reverse transform 1
-        if not cdata or cdata == b'\x00': return b''
-        if cdata[0] == 0: return cdata[1:]                              # Escape byte
-        num_passes = cdata[0]
-        if num_passes == 0 or len(cdata) < 1 + num_passes: return b''
-        shifts = list(cdata[1:1 + num_passes])
-        rle_data = cdata[1 + num_passes:]
-        decoded = self._rle_decode(rle_data)
-        if decoded is None: return b''
-        current = bytearray(decoded)
+        if not cdata or cdata == b'\x00': return b''                    # Empty or single zero → empty
+        if cdata[0] == 0: return cdata[1:]                              # Escape code: skip first byte
+        num_passes = cdata[0]                                           # Number of shift passes
+        if num_passes == 0 or len(cdata) < 1 + num_passes: return b''   # Sanity check
+        shifts = list(cdata[1:1 + num_passes])                          # Extract shift sequence
+        rle_data = cdata[1 + num_passes:]                               # The RLE‑encoded payload
+        decoded = self._rle_decode(rle_data)                            # Decode the RLE payload
+        if decoded is None: return b''                                  # Decoding failed
+        current = bytearray(decoded)                                    # Mutable copy
         for shift in reversed(shifts):                                  # Undo shifts in reverse order
             for i in range(len(current)):
-                current[i] = (current[i] - shift) % 256
+                current[i] = (current[i] - shift) % 256                 # Subtract shift modulo 256
         return bytes(current)
 
-    def _rle_decode(self, data: bytes) -> Optional[bytearray]:         # Decode RLE bitstream
-        if not data: return None
-        bits = []
+    def _rle_decode(self, data: bytes) -> Optional[bytearray]:         # Decode RLE bitstream back to bytearray
+        if not data: return None                                        # No data
+        bits = []                                                       # Convert input bytes to bit list
         for b in data:
             for i in range(7, -1, -1):
                 bits.append((b >> i) & 1)
         pos = 0
         nbits = len(bits)
-        if nbits < 11: return None
-        marker = self._read_bits(bits, pos, 3)
+        if nbits < 11: return None                                      # Minimum size for header + first code
+        marker = self._read_bits(bits, pos, 3)                          # Read magic marker
         pos += 3
-        if marker != 0b010: return None
-        pos += 8                                                        # Skip shift byte
+        if marker != 0b010: return None                                 # Wrong marker
+        pos += 8                                                        # Skip shift byte (not needed for decoding)
         out = bytearray()
-        while pos < nbits:
-            if pos + 2 > nbits: break
-            prefix = self._read_bits(bits, pos, 2)
+        while pos < nbits:                                              # Decode runs
+            if pos + 2 > nbits: break                                   # Need at least a 2‑bit prefix
+            prefix = self._read_bits(bits, pos, 2)                      # 2‑bit prefix
             pos += 2
-            if prefix == 0b00:
+            if prefix == 0b00:                                          # Single byte
                 if pos + 8 > nbits: break
                 run = 1
-            elif prefix == 0b01:
+            elif prefix == 0b01:                                        # Short run 2‑5
                 if pos + 2 + 8 > nbits: break
                 run = 2 + self._read_bits(bits, pos, 2)
                 pos += 2
-            elif prefix == 0b10:
+            elif prefix == 0b10:                                        # Medium run 6‑12
                 if pos + 3 + 8 > nbits: break
                 run = 6 + self._read_bits(bits, pos, 3)
                 pos += 3
-            else:                                                       # Prefix 11
+            else:                                                       # Long run (prefix 11)
                 if pos + 2 + 8 + 8 > nbits: break
-                if self._read_bits(bits, pos, 2) != 0b11: return None
+                if self._read_bits(bits, pos, 2) != 0b11: return None   # Sub‑prefix must be 11
                 pos += 2
                 run = 13 + self._read_bits(bits, pos, 8)
                 pos += 8
-            if pos + 8 > nbits: break
-            val = self._read_bits(bits, pos, 8)
+            if pos + 8 > nbits: break                                   # Need byte value
+            val = self._read_bits(bits, pos, 8)                         # Read byte value
             pos += 8
-            out.extend([val] * run)
-        for i in range(pos, nbits):                                     # Verify padding
-            if bits[i] != 0: return None
+            out.extend([val] * run)                                     # Append run of val
+        for i in range(pos, nbits):                                     # Check remaining bits are zero padding
+            if bits[i] != 0: return None                                # If not, data is corrupted
         return out
 
     # ------------------------------------------------------------------
     # Transforms 01‑21 (unchanged)
     # ------------------------------------------------------------------
-    def transform_01(self, d):                                           # Transform 2: XOR with prime‑based values
+    def transform_01(self, d):                                           # Transform 2: XOR every 3rd byte with prime‑derived value (repeated)
         t = bytearray(d)
         r = self.repeat_count
-        for prime in PRIMES:
-            xor_val = prime if prime == 2 else max(1, math.ceil(prime * 4096 / 28672))
-            for _ in range(r):
-                for i in range(0, len(t), 3):
+        for prime in PRIMES:                                            # For each prime under 256
+            xor_val = prime if prime == 2 else max(1, math.ceil(prime * 4096 / 28672))  # Compute XOR byte
+            for _ in range(r):                                          # Repeat r times
+                for i in range(0, len(t), 3):                          # Every 3rd byte
                     if i < len(t): t[i] ^= xor_val
         return bytes(t)
-    reverse_transform_01 = transform_01
+    reverse_transform_01 = transform_01                                 # XOR is its own inverse
 
-    def transform_02(self, d):                                           # Transform 3: checksum‑based pattern XOR
+    def transform_02(self, d):                                           # Transform 3: checksum‑based pattern XOR on positions 1,5,9,...
         if len(d) < 1: return b''
         t = bytearray(d)
-        checksum = sum(d) % 256
-        pattern_index = (len(d) + checksum) % 256
-        pattern_values = self._get_pattern(4, pattern_index)
-        for i in range(1, len(t), 4):
+        checksum = sum(d) % 256                                         # Compute checksum
+        pattern_index = (len(d) + checksum) % 256                       # Derive pattern index
+        pattern_values = self._get_pattern(4, pattern_index)            # Get a 4‑byte pattern
+        for i in range(1, len(t), 4):                                   # Every 4th byte starting at index 1
             if i < len(t): t[i] ^= pattern_values[i % len(pattern_values)]
-        return bytes([pattern_index]) + bytes(t)
-    def reverse_transform_02(self, d):
+        return bytes([pattern_index]) + bytes(t)                        # Prepend pattern_index
+    def reverse_transform_02(self, d):                                   # Reverse: same XOR, pattern_index is first byte
         if len(d) < 2: return b''
         pattern_index = d[0]
         t = bytearray(d[1:])
@@ -426,15 +425,15 @@ class PAQJPCompressorTransform65535:                                    # Core c
             if i < len(t): t[i] ^= pattern_values[i % len(pattern_values)]
         return bytes(t)
 
-    def transform_03(self, d):                                           # Transform 4: rotation of every 5th byte
+    def transform_03(self, d):                                           # Transform 4: rotate bits of every 5th byte
         if len(d) < 1: return b''
         t = bytearray(d)
-        rotation = (len(d) * 13 + sum(d)) % 8
-        if rotation == 0: rotation = 1
-        for i in range(2, len(t), 5):
+        rotation = (len(d) * 13 + sum(d)) % 8                           # Rotation amount (0‑7)
+        if rotation == 0: rotation = 1                                  # Avoid zero rotation
+        for i in range(2, len(t), 5):                                   # Every 5th byte starting at index 2
             if i < len(t): t[i] = ((t[i] << rotation) | (t[i] >> (8 - rotation))) & 0xFF
-        return bytes([rotation]) + bytes(t)
-    def reverse_transform_03(self, d):
+        return bytes([rotation]) + bytes(t)                             # Prepend rotation
+    def reverse_transform_03(self, d):                                   # Reverse: rotate in opposite direction
         if len(d) < 2: return b''
         rotation = d[0]
         t = bytearray(d[1:])
@@ -442,14 +441,14 @@ class PAQJPCompressorTransform65535:                                    # Core c
             if i < len(t): t[i] = ((t[i] >> rotation) | (t[i] << (8 - rotation))) & 0xFF
         return bytes(t)
 
-    def transform_04(self, d):                                           # Transform 5: subtract position modulo 256 (repeated)
+    def transform_04(self, d):                                           # Transform 5: subtract position modulo 256, repeated r times
         t = bytearray(d)
         r = self.repeat_count
         for _ in range(r):
             for i in range(len(t)):
                 t[i] = (t[i] - (i % 256)) % 256
         return bytes(t)
-    def reverse_transform_04(self, d):
+    def reverse_transform_04(self, d):                                   # Reverse: add position modulo 256
         t = bytearray(d)
         r = self.repeat_count
         for _ in range(r):
@@ -457,118 +456,118 @@ class PAQJPCompressorTransform65535:                                    # Core c
                 t[i] = (t[i] + (i % 256)) % 256
         return bytes(t)
 
-    def transform_05(self, d, s=3):                                     # Transform 6: left shift by s bits
+    def transform_05(self, d, s=3):                                     # Transform 6: left shift each byte by s bits
         t = bytearray(d)
         for i in range(len(t)): t[i] = ((t[i] << s) | (t[i] >> (8 - s))) & 0xFF
         return bytes(t)
-    def reverse_transform_05(self, d, s=3):
+    def reverse_transform_05(self, d, s=3):                             # Reverse: right shift by s bits
         t = bytearray(d)
         for i in range(len(t)): t[i] = ((t[i] >> s) | (t[i] << (8 - s))) & 0xFF
         return bytes(t)
 
-    def transform_06(self, d, sd=42):                                   # Transform 7: fixed substitution cipher
+    def transform_06(self, d, sd=42):                                   # Transform 7: substitution cipher with fixed random permutation
         random.seed(sd)
         sub = list(range(256))
-        random.shuffle(sub)
+        random.shuffle(sub)                                             # Create random permutation
         t = bytearray(d)
-        for i in range(len(t)): t[i] = sub[t[i]]
+        for i in range(len(t)): t[i] = sub[t[i]]                        # Apply substitution
         return bytes(t)
-    def reverse_transform_06(self, d, sd=42):
+    def reverse_transform_06(self, d, sd=42):                           # Reverse: inverse substitution
         random.seed(sd)
         sub = list(range(256))
         random.shuffle(sub)
         inv = [0]*256
-        for i in range(256): inv[sub[i]] = i
+        for i in range(256): inv[sub[i]] = i                            # Build inverse mapping
         t = bytearray(d)
         for i in range(len(t)): t[i] = inv[t[i]]
         return bytes(t)
 
-    def transform_07(self, d):                                           # Transform 8: XOR with size and rotated PI digits
+    def transform_07(self, d):                                           # Transform 8: XOR with length and rotated PI digits
         t = bytearray(d)
         r = self.repeat_count
-        sh = len(d) % len(self.PI_DIGITS)
-        pi_rot = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
-        sz = len(d) % 256
-        for i in range(len(t)): t[i] ^= sz
+        sh = len(d) % len(self.PI_DIGITS)                               # Rotation amount for PI_DIGITS
+        pi_rot = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]             # Rotated PI digits
+        sz = len(d) % 256                                               # Length mod 256
+        for i in range(len(t)): t[i] ^= sz                              # XOR with length
         for _ in range(r):
-            for i in range(len(t)): t[i] ^= pi_rot[i % len(pi_rot)]
+            for i in range(len(t)): t[i] ^= pi_rot[i % len(pi_rot)]    # XOR with rotated PI digits
         return bytes(t)
     reverse_transform_07 = transform_07
 
-    def transform_08(self, d):                                           # Transform 9: XOR with nearest prime + rotated PI
+    def transform_08(self, d):                                           # Transform 9: XOR with nearest prime + rotated PI digits
         t = bytearray(d)
         r = self.repeat_count
         sh = len(d) % len(self.PI_DIGITS)
         pi_rot = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
-        p = find_nearest_prime_around(len(d) % 256)
-        for i in range(len(t)): t[i] ^= p
+        p = find_nearest_prime_around(len(d) % 256)                     # Nearest prime to length%256
+        for i in range(len(t)): t[i] ^= p                                # XOR with prime
         for _ in range(r):
             for i in range(len(t)): t[i] ^= pi_rot[i % len(pi_rot)]
         return bytes(t)
     reverse_transform_08 = transform_08
 
-    def transform_09(self, d):                                           # Transform 10: XOR with seed + prime + rotated PI + pos
+    def transform_09(self, d):                                           # Transform 10: XOR with seed, prime, rotated PI, and position
         t = bytearray(d)
         r = self.repeat_count
         sh = len(d) % len(self.PI_DIGITS)
         pi_rot = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
         p = find_nearest_prime_around(len(d) % 256)
-        seed = self.get_seed(len(d) % len(self.seed_tables), len(d))
-        for i in range(len(t)): t[i] ^= p ^ seed
+        seed = self.get_seed(len(d) % len(self.seed_tables), len(d))    # Dynamic seed
+        for i in range(len(t)): t[i] ^= p ^ seed                         # XOR with prime and seed
         for _ in range(r):
-            for i in range(len(t)): t[i] ^= pi_rot[i % len(pi_rot)] ^ (i % 256)
+            for i in range(len(t)): t[i] ^= pi_rot[i % len(pi_rot)] ^ (i % 256)  # XOR with PI and position
         return bytes(t)
     reverse_transform_09 = transform_09
 
-    def transform_10(self, data: bytes) -> bytes:                       # Transform 11: XOR with count of 'X1' pairs
+    def transform_10(self, data: bytes) -> bytes:                       # Transform 11: XOR with derived byte from count of 'X1' pairs
         if not data: return b'\x00'
-        cnt = sum(1 for i in range(len(data)-1) if data[i:i+2] == b'X1')
-        n = (((cnt * 2) + 1) // 3) * 3 % 256
+        cnt = sum(1 for i in range(len(data)-1) if data[i:i+2] == b'X1')  # Count occurrences of b'X1'
+        n = (((cnt * 2) + 1) // 3) * 3 % 256                            # Compute XOR byte
         t = bytearray(data)
         for i in range(len(t)): t[i] ^= n
-        return bytes([n]) + bytes(t)
-    def reverse_transform_10(self, data: bytes) -> bytes:
+        return bytes([n]) + bytes(t)                                    # Store n as first byte
+    def reverse_transform_10(self, data: bytes) -> bytes:               # Reverse: XOR again with stored n
         if len(data) < 1: return b''
         n = data[0]
         t = bytearray(data[1:])
         for i in range(len(t)): t[i] ^= n
         return bytes(t)
 
-    def transform_11(self, data: bytes) -> bytes:                       # Transform 12: XOR with Fibonacci + position
+    def transform_11(self, data: bytes) -> bytes:                       # Transform 12: XOR with Fibonacci + position derived key
         if not data: return b''
         t = bytearray(data)
         length = len(t)
         for i in range(length):
-            fib_idx = (i + length) % len(self.fibonacci)
-            fib_val = self.fibonacci[fib_idx] % 256
-            pos_val = (i * 13 + length * 17) % 256
-            key = (fib_val ^ pos_val) % 256
+            fib_idx = (i + length) % len(self.fibonacci)                # Fibonacci index
+            fib_val = self.fibonacci[fib_idx] % 256                     # Fibonacci value mod 256
+            pos_val = (i * 13 + length * 17) % 256                       # Position‑dependent value
+            key = (fib_val ^ pos_val) % 256                              # Combine
             t[i] ^= key
         return bytes(t)
     reverse_transform_11 = transform_11
 
-    def transform_12(self, data: bytes) -> bytes:                       # Transform 13: XOR with Fibonacci sequence
+    def transform_12(self, data: bytes) -> bytes:                       # Transform 13: XOR with Fibonacci sequence directly
         t = bytearray(data)
         for i in range(len(t)): t[i] ^= self.fibonacci[i % len(self.fibonacci)] % 256
         return bytes(t)
     reverse_transform_12 = transform_12
 
-    def transform_13(self, d):                                           # Transform 14: XOR with nearest prime repeated
+    def transform_13(self, d):                                           # Transform 14: XOR with last of repeatedly found nearest primes
         if not d: return b''
-        repeats = self._calculate_repeats(d)
+        repeats = self._calculate_repeats(d)                            # Number of repetitions
         current_value = len(d) % 256
         prime_values = []
         count = 0
-        while count < repeats:
+        while count < repeats:                                          # Find 'repeats' nearest primes
             current_value = find_nearest_prime_around(current_value)
             prime_values.append(current_value)
             count += 1
         t = bytearray(d)
-        xor_value = prime_values[-1] if prime_values else 0
+        xor_value = prime_values[-1] if prime_values else 0             # Use the last found prime
         for i in range(len(t)): t[i] ^= xor_value
         repeat_byte = (repeats - 1) % 256
         return bytes([repeat_byte]) + bytes(t)
-    def reverse_transform_13(self, d):
+    def reverse_transform_13(self, d):                                   # Reverse: extract repeats, compute same XOR value
         if len(d) < 2: return b''
         repeat_byte = d[0]
         repeats = (repeat_byte + 1) % 256
@@ -589,7 +588,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         if not d: return b'\x00'
         checksum = sum(d) % 256
         return d + bytes([checksum])
-    def reverse_transform_14(self, d):
+    def reverse_transform_14(self, d):                                   # Reverse: remove last byte
         if not d: return b''
         return d[:-1]
 
@@ -601,7 +600,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         for i in range(0, len(t), 3):
             if i < len(t): t[i] = (t[i] + pattern_values[i % len(pattern_values)]) % 256
         return bytes([pattern_index]) + bytes(t)
-    def reverse_transform_15(self, d):
+    def reverse_transform_15(self, d):                                   # Reverse: subtract pattern
         if len(d) < 2: return b''
         pattern_index = d[0]
         t = bytearray(d[1:])
@@ -610,7 +609,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
             if i < len(t): t[i] = (t[i] - pattern_values[i % len(pattern_values)]) % 256
         return bytes(t)
 
-    def transform_16(self, data: bytes) -> bytes:                       # Transform 17: XOR with derived byte
+    def transform_16(self, data: bytes) -> bytes:                       # Transform 17: XOR with derived byte (len*7+13 mod 256)
         if not data: return b''
         xor_byte = (len(data) * 7 + 13) % 256
         t = bytearray(data)
@@ -619,16 +618,16 @@ class PAQJPCompressorTransform65535:                                    # Core c
     reverse_transform_16 = transform_16
 
     # transform_17 defined earlier (Pi mask)
-    def transform_18(self, data: bytes) -> bytes:                       # Transform 18: XOR with Basel (π²/6) mask
+    def transform_18(self, data: bytes) -> bytes:                       # Transform 18: XOR with Basel‑derived mask
         if not data: return b''
-        digits = self.get_basel_digits(max(10, len(data)//2 + 5))
-        mask = bytes(int(digits[i:i+2]) % 256 for i in range(0, len(digits), 2))
+        digits = self.get_basel_digits(max(10, len(data)//2 + 5))      # Get enough digits
+        mask = bytes(int(digits[i:i+2]) % 256 for i in range(0, len(digits), 2))  # Create mask bytes
         t = bytearray(data)
         for i in range(len(t)): t[i] ^= mask[i % len(mask)]
         return bytes(t)
     reverse_transform_18 = transform_18
 
-    def transform_19(self, data: bytes) -> bytes:                       # Transform 19: XOR with 1/e mask
+    def transform_19(self, data: bytes) -> bytes:                       # Transform 19: XOR with 1/e‑derived mask
         if not data: return b''
         digits = self.get_one_over_e_digits(max(10, len(data)//2 + 5))
         mask = bytes(int(digits[i:i+2]) % 256 for i in range(0, len(digits), 2))
@@ -637,7 +636,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         return bytes(t)
     reverse_transform_19 = transform_19
 
-    def transform_20(self, data: bytes) -> bytes:                       # Transform 20: XOR with 5e mask
+    def transform_20(self, data: bytes) -> bytes:                       # Transform 20: XOR with 5e‑derived mask
         if not data: return b''
         digits = self.get_5e_digits(max(10, len(data)//2 + 5))
         mask = bytes(int(digits[i:i+2]) % 256 for i in range(0, len(digits), 2))
@@ -652,7 +651,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         t = bytearray(data)
         for i in range(len(t)): t[i] = (t[i] + shift) % 256
         return bytes(t)
-    def reverse_transform_21(self, data: bytes) -> bytes:
+    def reverse_transform_21(self, data: bytes) -> bytes:               # Reverse: subtract 255
         if not data: return b''
         shift = 255
         t = bytearray(data)
@@ -662,35 +661,35 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # Transform 23: Iterative Constant Diapason
     # ------------------------------------------------------------------
-    def _compress_bits(self, bits: List[int]) -> bytes:                 # Compress bit list using iterative nibble code
-        orig_bit_len = len(bits)
+    def _compress_bits(self, bits: List[int]) -> bytes:                 # Compress bit list using iterative nibble encoding
+        orig_bit_len = len(bits)                                        # Record original bit length
         if orig_bit_len == 0:
-            return b'\x00\x00\x00'
-        current_bits = bits[:]
+            return b'\x00\x00\x00'                                      # Return header for empty bitstring
+        current_bits = bits[:]                                          # Working copy
         prev_len = orig_bit_len
         pass_count = 0
-        while pass_count < 255:
-            pad_len = (4 - len(current_bits) % 4) % 4
+        while pass_count < 255:                                         # Max 255 passes
+            pad_len = (4 - len(current_bits) % 4) % 4                   # Pad to multiple of 4 bits
             padded = current_bits + [0] * pad_len
             nibble_count = len(padded) // 4
             encoded_bits = []
-            for i in range(nibble_count):
+            for i in range(nibble_count):                               # Encode each nibble
                 nibble = (padded[i*4] << 3) | (padded[i*4+1] << 2) | (padded[i*4+2] << 1) | padded[i*4+3]
                 length, codeword = _CONST_DIAPASON_ITER_CODE[nibble]
                 for b in range(length-1, -1, -1):
                     encoded_bits.append((codeword >> b) & 1)
             new_len = len(encoded_bits)
-            if new_len < prev_len:
+            if new_len < prev_len:                                      # If compression occurred
                 current_bits = encoded_bits
                 prev_len = new_len
                 pass_count += 1
             else:
                 break
-        header = bytes([(orig_bit_len >> 8) & 0xFF, orig_bit_len & 0xFF, pass_count])
+        header = bytes([(orig_bit_len >> 8) & 0xFF, orig_bit_len & 0xFF, pass_count])  # 3‑byte header
         pad = (8 - len(current_bits) % 8) % 8
         current_bits += [0] * pad
         out_bytes = bytearray()
-        for i in range(0, len(current_bits), 8):
+        for i in range(0, len(current_bits), 8):                        # Convert bits to bytes
             val = 0
             for j in range(8):
                 val = (val << 1) | current_bits[i+j]
@@ -700,21 +699,21 @@ class PAQJPCompressorTransform65535:                                    # Core c
     def _decompress_bits(self, data: bytes) -> List[int]:               # Decompress bit list
         if len(data) < 3:
             return []
-        orig_bit_len = (data[0] << 8) | data[1]
-        pass_count = data[2]
-        payload = data[3:]
-        bits = []
+        orig_bit_len = (data[0] << 8) | data[1]                         # Original bit length
+        pass_count = data[2]                                            # Number of encoding passes
+        payload = data[3:]                                              # Compressed data
+        bits = []                                                       # Convert payload to bits
         for byte in payload:
             for i in range(7, -1, -1):
                 bits.append((byte >> i) & 1)
         current_bits = bits
-        for _ in range(pass_count):
+        for _ in range(pass_count):                                     # Reverse each pass
             pos = 0
             nbits = len(current_bits)
             decoded_nibbles = []
             while pos < nbits:
                 matched = False
-                for length in range(2, 10):
+                for length in range(2, 10):                             # Possible code lengths 2‑9
                     if pos + length > nbits: continue
                     codeword = 0
                     for k in range(length):
@@ -725,61 +724,61 @@ class PAQJPCompressorTransform65535:                                    # Core c
                         pos += length
                         matched = True
                         break
-                if not matched: break
-            new_bits = []
+                if not matched: break                                   # If no match, stop
+            new_bits = []                                               # Convert nibbles back to bits
             for nibble in decoded_nibbles:
                 for j in range(3, -1, -1):
                     new_bits.append((nibble >> j) & 1)
             current_bits = new_bits
         if len(current_bits) < orig_bit_len:
             return []
-        return current_bits[:orig_bit_len]
+        return current_bits[:orig_bit_len]                              # Truncate to original length
 
-    def transform_23(self, data: bytes) -> bytes:                       # Transform 23: apply diapason compression
+    def transform_23(self, data: bytes) -> bytes:                       # Transform 23: apply diapason compression to whole data
         if not data: return b'\x00\x00\x00'
         bits = []
-        for byte in data:
+        for byte in data:                                               # Convert bytes to bit list
             for i in range(7, -1, -1):
                 bits.append((byte >> i) & 1)
         return self._compress_bits(bits)
 
-    def reverse_transform_23(self, data: bytes) -> bytes:               # Reverse transform 23
+    def reverse_transform_23(self, data: bytes) -> bytes:               # Reverse: decompress and form bytes
         bits = self._decompress_bits(data)
         if not bits:
             return b''
         out_bytes = bytearray()
-        for i in range(0, len(bits), 8):
+        for i in range(0, len(bits), 8):                                # Convert bits back to bytes
             val = 0
             for j in range(i, min(i+8, len(bits))):
                 val = (val << 1) | bits[j]
             if i+8 > len(bits):
-                val <<= (8 - (len(bits) - i))
+                val <<= (8 - (len(bits) - i))                           # Pad last incomplete byte
             out_bytes.append(val)
         return bytes(out_bytes)
 
     # ------------------------------------------------------------------
     # Transform 24 – constant‑byte run compression inside 43‑byte blocks
     # ------------------------------------------------------------------
-    def transform_24(self, data: bytes) -> bytes:                       # Block RLE (43 bytes)
+    def transform_24(self, data: bytes) -> bytes:                       # Transform 24: block RLE with 43‑byte windows
         if not data: return b''
         MAX_LEN = 43
         bits = []
         i = 0
         n = len(data)
         while i < n:
-            chunk_len = min(MAX_LEN, n - i)
+            chunk_len = min(MAX_LEN, n - i)                             # Take at most 43 bytes
             chunk = data[i:i+chunk_len]
             first = chunk[0]
-            all_same = all(b == first for b in chunk)
+            all_same = all(b == first for b in chunk)                   # Check if all bytes identical
             if all_same:
-                self._append_bits(bits, 1, 1)
-                self._append_bits(bits, first, 8)
-                self._append_bits(bits, chunk_len - 1, 6)
+                self._append_bits(bits, 1, 1)                           # Flag: run
+                self._append_bits(bits, first, 8)                       # Byte value
+                self._append_bits(bits, chunk_len - 1, 6)               # Length-1 (max 42 fits in 6 bits)
             else:
-                self._append_bits(bits, 0, 1)
-                self._append_bits(bits, chunk_len, 6)
+                self._append_bits(bits, 0, 1)                           # Flag: raw
+                self._append_bits(bits, chunk_len, 6)                   # Length of raw chunk
                 for b in chunk:
-                    self._append_bits(bits, b, 8)
+                    self._append_bits(bits, b, 8)                       # Each byte
             i += chunk_len
         pad = (8 - len(bits) % 8) % 8
         self._append_bits(bits, 0, pad)
@@ -802,19 +801,19 @@ class PAQJPCompressorTransform65535:                                    # Core c
         out = bytearray()
         while pos < nbits:
             if pos + 1 > nbits: break
-            flag = self._read_bits(bits, pos, 1)
+            flag = self._read_bits(bits, pos, 1)                        # Read flag
             pos += 1
-            if flag == 1:
+            if flag == 1:                                               # Run
                 if pos + 8 + 6 > nbits: break
-                byte_val = self._read_bits(bits, pos, 8)
+                byte_val = self._read_bits(bits, pos, 8)                # Byte value
                 pos += 8
-                count_minus1 = self._read_bits(bits, pos, 6)
+                count_minus1 = self._read_bits(bits, pos, 6)           # Length-1
                 pos += 6
                 run_len = count_minus1 + 1
                 out.extend([byte_val] * run_len)
-            else:
+            else:                                                       # Raw
                 if pos + 6 > nbits: break
-                chunk_len = self._read_bits(bits, pos, 6)
+                chunk_len = self._read_bits(bits, pos, 6)               # Raw length
                 pos += 6
                 if chunk_len == 0: break
                 if pos + chunk_len * 8 > nbits: break
@@ -827,18 +826,18 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # Transform 25 – Fermat Little Theorem, 1‑byte exponent (fixed n=3)
     # ------------------------------------------------------------------
-    def transform_25(self, data: bytes) -> bytes:                       # Transform 25: Fermat with n=3
+    def transform_25(self, data: bytes) -> bytes:                       # Transform 25: Fermat with exponent 3
         if not data: return b'\x01'
         n = 3
         res = bytearray(data)
         for i in range(len(res)):
-            res[i] = (pow(res[i] + 1, n, 257) - 1) & 0xFF
+            res[i] = (pow(res[i] + 1, n, 257) - 1) & 0xFF              # Apply (b+1)^3 mod 257 -1 mod 256
         return bytes([n]) + bytes(res)
 
-    def reverse_transform_25(self, data: bytes) -> bytes:               # Reverse: modular inverse of n=3
+    def reverse_transform_25(self, data: bytes) -> bytes:               # Reverse: modular inverse exponent
         if not data or len(data) < 2: return b''
         n = data[0]
-        inv = pow(n, -1, 256)
+        inv = pow(n, -1, 256)                                           # Modular inverse of n modulo 256
         res = bytearray(data[1:])
         for i in range(len(res)):
             res[i] = (pow(res[i] + 1, inv, 257) - 1) & 0xFF
@@ -847,16 +846,16 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # Transform 26 – Fermat Little Theorem, 2‑byte n, 16,777,216 repeats per byte
     # ------------------------------------------------------------------
-    def transform_26(self, data: bytes) -> bytes:                       # Transform 26: Fermat with large exponent
+    def transform_26(self, data: bytes) -> bytes:                       # Transform 26: Fermat with large exponent derived from n
         if not data: return b'\x01\x00'
-        n = (len(data) * 7 + 13) & 0xFFFF
+        n = (len(data) * 7 + 13) & 0xFFFF                               # Derive n from length
         if n % 2 == 0:
-            n ^= 1
-        e = pow(n, 16777216, 256) | 1
+            n ^= 1                                                      # Ensure odd
+        e = pow(n, 16777216, 256) | 1                                   # Compute exponent (guarantees odd)
         res = bytearray(data)
         for i in range(len(res)):
             res[i] = (pow(res[i] + 1, e, 257) - 1) & 0xFF
-        return bytes([n & 0xFF, (n >> 8) & 0xFF]) + bytes(res)
+        return bytes([n & 0xFF, (n >> 8) & 0xFF]) + bytes(res)         # Store n in 2 bytes
 
     def reverse_transform_26(self, data: bytes) -> bytes:               # Reverse
         if not data or len(data) < 2: return b''
@@ -864,7 +863,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         if n % 2 == 0:
             n ^= 1
         e = pow(n, 16777216, 256) | 1
-        inv_e = pow(e, -1, 256)
+        inv_e = pow(e, -1, 256)                                         # Inverse exponent mod 256
         res = bytearray(data[2:])
         for i in range(len(res)):
             res[i] = (pow(res[i] + 1, inv_e, 257) - 1) & 0xFF
@@ -873,32 +872,32 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # Transform 27 – Blockwise Fermat on 8192‑bit chunks (1024 bytes)
     # ------------------------------------------------------------------
-    def transform_27(self, data: bytes) -> bytes:                       # Transform 27: blockwise Fermat (1024‑byte blocks)
+    def transform_27(self, data: bytes) -> bytes:                       # Transform 27: blockwise Fermat on 1024‑byte blocks
         if not data:
-            out = bytearray(b'\x00\x00\x00\x00')
-            out.extend(b'\x01\x00')
-            out.extend(b'\x00' * 1024)
+            out = bytearray(b'\x00\x00\x00\x00')                        # Empty: length 0
+            out.extend(b'\x01\x00')                                     # n=1
+            out.extend(b'\x00' * 1024)                                  # Dummy block
             return bytes(out)
         BLOCK_SIZE = 1024
         total_blocks = (len(data) + BLOCK_SIZE - 1) // BLOCK_SIZE
         out = bytearray()
-        out.extend(len(data).to_bytes(4, 'big'))
+        out.extend(len(data).to_bytes(4, 'big'))                        # Store original length
         for block_idx in range(total_blocks):
             start = block_idx * BLOCK_SIZE
             end = min(start + BLOCK_SIZE, len(data))
             chunk = data[start:end]
             pad_len = BLOCK_SIZE - len(chunk)
             if pad_len:
-                chunk = chunk + b'\x00' * pad_len
-            n = ((len(data) * 7 + block_idx * 13 + 1) & 0xFFFF) | 1
+                chunk = chunk + b'\x00' * pad_len                       # Pad with zeros
+            n = ((len(data) * 7 + block_idx * 13 + 1) & 0xFFFF) | 1    # Block‑specific n
             e = pow(n, 16777216, 256) | 1
-            e200 = pow(e, 200, 256)
+            e200 = pow(e, 200, 256)                                     # e^200 mod 256
             transformed = bytearray(chunk)
             for i in range(BLOCK_SIZE):
                 transformed[i] = (pow(transformed[i] + 1, e200, 257) - 1) & 0xFF
-            out.append(n & 0xFF)
+            out.append(n & 0xFF)                                        # Store n (2 bytes)
             out.append((n >> 8) & 0xFF)
-            out.extend(transformed)
+            out.extend(transformed)                                     # Store transformed block
         return bytes(out)
 
     def reverse_transform_27(self, data: bytes) -> bytes:               # Reverse blockwise Fermat
@@ -907,7 +906,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         payload = data[4:]
         BLOCK_SIZE = 1024
         block_total_len = 2 + BLOCK_SIZE
-        if len(payload) % block_total_len != 0:
+        if len(payload) % block_total_len != 0:                         # Corrupt
             return data
         num_blocks = len(payload) // block_total_len
         decoded = bytearray()
@@ -926,7 +925,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # Transform 28 – Blockwise Fermat 1024‑byte + backend compress
     # ------------------------------------------------------------------
-    def transform_28(self, data: bytes) -> bytes:                       # Transform 28: blockwise Fermat + backend
+    def transform_28(self, data: bytes) -> bytes:                       # Transform 28: Block Fermat + backend compressor
         if not data:
             out = bytearray(b'\x00\x00\x00\x00')
             out.extend(b'\x01\x00')
@@ -949,7 +948,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
             transformed = bytearray(chunk)
             for i in range(BLOCK_SIZE):
                 transformed[i] = (pow(transformed[i] + 1, e200, 257) - 1) & 0xFF
-            compressed_block = self._compress_backend(bytes(transformed))
+            compressed_block = self._compress_backend(bytes(transformed))  # Apply backend compression
             out.append(n & 0xFF)
             out.append((n >> 8) & 0xFF)
             L = len(compressed_block)
@@ -974,7 +973,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
             if pos + comp_len > len(payload): break
             comp_block = payload[pos:pos+comp_len]
             pos += comp_len
-            block = self._decompress_backend(comp_block)
+            block = self._decompress_backend(comp_block)                # Decompress backend
             if block is None: return data
             n |= 1
             e = pow(n, 16777216, 256) | 1
@@ -989,7 +988,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # Transform 29 – 32‑byte blocks, 2^256 repeats, backend compress
     # ------------------------------------------------------------------
-    def transform_29(self, data: bytes) -> bytes:                       # Transform 29: identity Fermat (e=1) + backend
+    def transform_29(self, data: bytes) -> bytes:                       # Transform 29: Identity Fermat (exponent 1) + backend
         if not data:
             out = bytearray(b'\x00\x00\x00\x00')
             out.extend(b'\x01\x00')
@@ -1007,9 +1006,9 @@ class PAQJPCompressorTransform65535:                                    # Core c
             if pad_len:
                 chunk = chunk + b'\x00' * pad_len
             n = ((len(data) * 7 + block_idx * 13 + 1) & 0xFFFF) | 1
-            e = pow(n, 2**256, 256) | 1   # always 1
-            e200 = pow(e, 200, 256)       # always 1
-            transformed = bytearray(chunk)  # unchanged
+            e = pow(n, 2**256, 256) | 1   # Always 1
+            e200 = pow(e, 200, 256)       # Always 1
+            transformed = bytearray(chunk)  # Unchanged
             compressed_block = self._compress_backend(bytes(transformed))
             out.append(n & 0xFF)
             out.append((n >> 8) & 0xFF)
@@ -1019,7 +1018,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
             out.extend(compressed_block)
         return bytes(out)
 
-    def reverse_transform_29(self, data: bytes) -> bytes:               # Reverse 29
+    def reverse_transform_29(self, data: bytes) -> bytes:               # Reverse 29: just backend decompress
         if not data or len(data) < 4: return b''
         orig_len = int.from_bytes(data[:4], 'big')
         payload = data[4:]
@@ -1037,33 +1036,33 @@ class PAQJPCompressorTransform65535:                                    # Core c
             pos += comp_len
             block = self._decompress_backend(comp_block)
             if block is None: return data
-            decoded.extend(block)   # reverse is identity
+            decoded.extend(block)   # Identity reverse
         return bytes(decoded[:orig_len])
 
     # ------------------------------------------------------------------
     # Transform 30 – 33‑byte blocks, variable‑length n
     # ------------------------------------------------------------------
     def _compute_n_for_block(self, block: bytes, block_idx: int, total_len: int) -> Tuple[int, bytes]:
-        if not block:
-            return (1, b'\x01\x01')
-        d = block[0]
-        x = (block_idx % 33) + 1
+        if not block:                                                       # If block empty
+            return (1, b'\x01\x01')                                         # Default n=1 encoded as length 1, n=1
+        d = block[0]                                                        # First byte of block
+        x = (block_idx % 33) + 1                                            # Derived exponent
         try:
-            t = (d*d - d**x) // 256
+            t = (d*d - d**x) // 256                                          # Formula result
         except OverflowError:
             t = 0
-        if 0 <= t <= 255:
-            n = t | 1
-            return (n, bytes([1, n]))
+        if 0 <= t <= 255:                                                   # If t is a byte
+            n = t | 1                                                       # Make odd
+            return (n, bytes([1, n]))                                       # Encode as length 1 + n
         h = hashlib.sha256(block + bytes([block_idx & 0xFF, (total_len>>8)&0xFF, total_len&0xFF])).digest()
         n_bytes = bytearray(h)
-        n_bytes[0] |= 1
+        n_bytes[0] |= 1                                                     # Ensure odd
         length = len(n_bytes)
         encoded = bytes([length]) + bytes(n_bytes)
         n = int.from_bytes(n_bytes, 'big')
         return (n, encoded)
 
-    def transform_30(self, data: bytes) -> bytes:                       # Transform 30: variable n, backend compress
+    def transform_30(self, data: bytes) -> bytes:                       # Transform 30: Variable n Fermat + backend compress
         if not data:
             out = bytearray(b'\x00\x00\x00\x00')
             out.extend(b'\x01\x01')
@@ -1080,10 +1079,10 @@ class PAQJPCompressorTransform65535:                                    # Core c
             pad_len = BLOCK_SIZE - len(chunk)
             if pad_len:
                 chunk = chunk + b'\x00' * pad_len
-            n, enc_n = self._compute_n_for_block(chunk, block_idx, len(data))
-            transformed = chunk
+            n, enc_n = self._compute_n_for_block(chunk, block_idx, len(data))  # Compute n and its encoding
+            transformed = chunk                                             # No actual transform applied
             compressed_block = self._compress_backend(transformed)
-            out.extend(enc_n)
+            out.extend(enc_n)                                               # Store encoded n
             L = len(compressed_block)
             out.append((L >> 8) & 0xFF)
             out.append(L & 0xFF)
@@ -1098,10 +1097,10 @@ class PAQJPCompressorTransform65535:                                    # Core c
         decoded = bytearray()
         while pos < len(payload):
             if pos >= len(payload): break
-            Ln = payload[pos]
+            Ln = payload[pos]                                               # Length of n encoding
             pos += 1
             if Ln > 32 or pos + Ln > len(payload): break
-            n_bytes = payload[pos:pos+Ln]
+            n_bytes = payload[pos:pos+Ln]                                   # The n bytes
             pos += Ln
             if pos + 2 > len(payload): break
             comp_len = (payload[pos] << 8) | payload[pos+1]
@@ -1111,7 +1110,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
             pos += comp_len
             block = self._decompress_backend(comp_block)
             if block is None: return data
-            decoded.extend(block)
+            decoded.extend(block)                                           # Identity reverse
         return bytes(decoded[:orig_len])
 
     # ------------------------------------------------------------------
@@ -1125,12 +1124,12 @@ class PAQJPCompressorTransform65535:                                    # Core c
         for i in range(n):
             t[i] ^= mask[i % 2]
         return bytes(t)
-    reverse_transform_41 = transform_41
+    reverse_transform_41 = transform_41                                 # XOR is self‑inverse
 
     # ------------------------------------------------------------------
     # Transform 42 – Extended Algorithm 2703 (every byte XOR 0x27,0x03)
     # ------------------------------------------------------------------
-    def transform_42(self, data: bytes) -> bytes:                       # Transform 42: XOR every byte with 0x27,0x03
+    def transform_42(self, data: bytes) -> bytes:                       # Transform 42: XOR all bytes with 0x27,0x03 cyclically
         if not data: return b''
         t = bytearray(data)
         mask = bytes([0x27, 0x03])
@@ -1157,36 +1156,36 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     def transform_44(self, data: bytes) -> bytes:                       # Transform 44: Base64 encode
         if not data: return b''
-        b64_str = base64.b64encode(data).decode('ascii')
-        return b64_str.encode('ascii')
+        b64_str = base64.b64encode(data).decode('ascii')                # Encode to ASCII string
+        return b64_str.encode('ascii')                                  # Convert to bytes
     def reverse_transform_44(self, data: bytes) -> bytes:               # Reverse: Base64 decode
         if not data: return b''
         try:
             b64_str = data.decode('ascii')
             return base64.b64decode(b64_str)
         except (ValueError, UnicodeDecodeError):
-            return data
+            return data                                                 # If invalid, return unchanged
 
     # ------------------------------------------------------------------
     # Huffman coding helpers
     # ------------------------------------------------------------------
     @staticmethod
     def _huffman_code_lengths(freq: List[int]) -> List[int]:            # Compute Huffman code lengths from frequencies
-        heap = [(f, i) for i, f in enumerate(freq) if f > 0]
+        heap = [(f, i) for i, f in enumerate(freq) if f > 0]           # Create heap of (freq, symbol)
         if not heap:
-            return [0]*256
-        if len(heap) == 1:
+            return [0]*256                                              # No symbols → all zero lengths
+        if len(heap) == 1:                                              # Single symbol → length 1
             lengths = [0]*256
             lengths[heap[0][1]] = 1
             return lengths
         heapq.heapify(heap)
-        while len(heap) > 1:
+        while len(heap) > 1:                                            # Build Huffman tree
             f1, n1 = heapq.heappop(heap)
             f2, n2 = heapq.heappop(heap)
             heapq.heappush(heap, (f1 + f2, (n1, n2)))
         lengths = [0]*256
         def traverse(node, depth):
-            if isinstance(node, int):
+            if isinstance(node, int):                                   # Leaf
                 lengths[node] = depth
             else:
                 traverse(node[0], depth + 1)
@@ -1198,7 +1197,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
     @staticmethod
     def _huffman_canonical_codes(code_lengths: List[int]) -> Dict[int, Tuple[int, int]]:
         symbols = list(range(256))
-        symbols.sort(key=lambda s: (code_lengths[s], s))
+        symbols.sort(key=lambda s: (code_lengths[s], s))               # Sort by length, then symbol
         codes = {}
         code = 0
         prev_len = 0
@@ -1211,29 +1210,29 @@ class PAQJPCompressorTransform65535:                                    # Core c
                 prev_len = cl
                 first = False
             elif cl != prev_len:
-                code <<= (cl - prev_len)
+                code <<= (cl - prev_len)                                # Shift for longer codes
                 prev_len = cl
-            codes[sym] = (code, cl)
+            codes[sym] = (code, cl)                                     # (canonical code, length)
             code += 1
         return codes
 
     # ------------------------------------------------------------------
     # Transform 45 – Huffman Coding (lossless, single‑symbol fix)
     # ------------------------------------------------------------------
-    def transform_45(self, data: bytes) -> bytes:                       # Transform 45: Canonical Huffman encode
+    def transform_45(self, data: bytes) -> bytes:                       # Transform 45: Huffman encode
         if not data: return b''
         freq = [0]*256
-        for b in data:
+        for b in data:                                                  # Count frequencies
             freq[b] += 1
         code_lengths = self._huffman_code_lengths(freq)
         codes = self._huffman_canonical_codes(code_lengths)
         header = bytearray()
-        header.extend(len(data).to_bytes(4, 'big'))
-        header.extend(code_lengths)
+        header.extend(len(data).to_bytes(4, 'big'))                    # Original length (4 bytes)
+        header.extend(code_lengths)                                     # 256 length bytes
         bits = []
         for b in data:
             c, cl = codes[b]
-            for i in range(cl - 1, -1, -1):
+            for i in range(cl - 1, -1, -1):                             # Append code bits MSB first
                 bits.append((c >> i) & 1)
         pad = (8 - len(bits) % 8) % 8
         bits.extend([0] * pad)
@@ -1247,7 +1246,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
 
     def reverse_transform_45(self, data: bytes) -> bytes:               # Huffman decode
         if not data: return b''
-        if len(data) < 4 + 256: return data
+        if len(data) < 4 + 256: return data                             # Not enough header
         original_len = int.from_bytes(data[:4], 'big')
         code_lengths = list(data[4:4+256])
         payload = data[4+256:]
@@ -1255,7 +1254,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
             return b''
         code_to_sym = {}
         symbols = list(range(256))
-        symbols.sort(key=lambda s: (code_lengths[s], s))
+        symbols.sort(key=lambda s: (code_lengths[s], s))               # Build canonical code -> symbol mapping
         code = 0
         prev_len = 0
         first = True
@@ -1272,7 +1271,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
             code_to_sym[(cl, code)] = sym
             code += 1
         bits = []
-        for byte in payload:
+        for byte in payload:                                            # Convert payload to bit list
             for i in range(7, -1, -1):
                 bits.append((byte >> i) & 1)
         pos = 0
@@ -1280,7 +1279,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         out = bytearray()
         while pos < nbits and len(out) < original_len:
             found = False
-            for cl in range(1, 256):
+            for cl in range(1, 256):                                    # Try each code length
                 if pos + cl > nbits:
                     break
                 val = 0
@@ -1311,55 +1310,55 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # Transform 47 – PAQ state table minus 400 XOR
     # ------------------------------------------------------------------
-    def transform_47(self, data: bytes) -> bytes:                       # Transform 47: XOR with mod_state_table
+    def transform_47(self, data: bytes) -> bytes:                       # Transform 47: XOR with modified PAQ table
         if not data: return b''
         t = bytearray(data)
         for i in range(len(t)):
-            row = self.mod_state_table[t[i] % 256]
-            t[i] ^= row[0]
+            row = self.mod_state_table[t[i] % 256]                      # Get row from mod_state_table
+            t[i] ^= row[0]                                              # XOR with first column of row
         return bytes(t)
     reverse_transform_47 = transform_47
 
     # ------------------------------------------------------------------
     # Transforms 48‑255 : dynamic (XOR with seed)
     # ------------------------------------------------------------------
-    def _dynamic_transform(self, n: int):                               # Dynamic XOR transform generator
-        def tf(data: bytes):
+    def _dynamic_transform(self, n: int):                               # Generate a dynamic XOR transform for index n
+        def tf(data: bytes):                                            # The transform function
             if not data: return b''
-            seed = self.get_seed(n % len(self.seed_tables), len(data))  # Seed based on transform index & data length
+            seed = self.get_seed(n % len(self.seed_tables), len(data))  # Get seed byte
             t = bytearray(data)
             for i in range(len(t)):
-                t[i] ^= seed                                            # Apply constant XOR
+                t[i] ^= seed                                            # XOR every byte with the same seed
             return bytes(t)
         return tf, tf                                                   # Both forward and reverse are identical
 
     # ------------------------------------------------------------------
     # Identity transform 256
     # ------------------------------------------------------------------
-    def transform_256(self, d: bytes) -> bytes:                         # Identity (do nothing)
+    def transform_256(self, d: bytes) -> bytes:                         # Transform 256: identity (no change)
         return d
     reverse_transform_256 = transform_256
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _get_pattern(self, size: int, index: int):                      # Deterministic pattern generation
-        random.seed(12345 + size * 100 + index)
+    def _get_pattern(self, size: int, index: int):                      # Deterministic pattern of given size
+        random.seed(12345 + size * 100 + index)                        # Seed with combination of size and index
         return [random.randint(0, 255) for _ in range(size)]
 
-    def _calculate_repeats(self, data: bytes) -> int:                   # Compute repeat count for transform 13
+    def _calculate_repeats(self, data: bytes) -> int:                   # Compute number of repeats for transform 13
         if not data: return 1
         length = len(data)
         byte_sum = sum(data) % 256
         repeats = ((length * 13 + byte_sum * 17) % 256) + 1
-        return max(1, min(256, repeats))
+        return max(1, min(256, repeats))                                # Clamp between 1 and 256
 
     # ------------------------------------------------------------------
     # Build transform maps (1..256)
     # ------------------------------------------------------------------
-    def _build_transform_maps(self):                                    # Register all 256 transforms
-        self.fwd_transforms: Dict[int, Callable] = {}
-        self.rev_transforms: Dict[int, Callable] = {}
+    def _build_transform_maps(self):                                    # Register all 256 transforms with forward and reverse functions
+        self.fwd_transforms: Dict[int, Callable] = {}                   # Forward transform dictionary
+        self.rev_transforms: Dict[int, Callable] = {}                   # Reverse transform dictionary
 
         # 1‑24: original set
         self.fwd_transforms[1] = self.transform_00; self.rev_transforms[1] = self.reverse_transform_00
@@ -1387,7 +1386,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         self.fwd_transforms[23] = self.transform_23; self.rev_transforms[23] = self.reverse_transform_23
         self.fwd_transforms[24] = self.transform_24; self.rev_transforms[24] = self.reverse_transform_24
 
-        # 25‑30: Fermat‑Little‑Theorem based (two algorithm family #1)
+        # 25‑30: Fermat‑Little‑Theorem based (first special family)
         self.fwd_transforms[25] = self.transform_25; self.rev_transforms[25] = self.reverse_transform_25
         self.fwd_transforms[26] = self.transform_26; self.rev_transforms[26] = self.reverse_transform_26
         self.fwd_transforms[27] = self.transform_27; self.rev_transforms[27] = self.reverse_transform_27
@@ -1401,7 +1400,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
 
-        # 41‑47: special named algorithms (Algorithm 2703, Base64, Huffman, etc.)
+        # 41‑47: special named algorithms (second special family)
         self.fwd_transforms[41] = self.transform_41; self.rev_transforms[41] = self.reverse_transform_41
         self.fwd_transforms[42] = self.transform_42; self.rev_transforms[42] = self.reverse_transform_42
         self.fwd_transforms[43] = self.transform_43; self.rev_transforms[43] = self.reverse_transform_43
@@ -1410,7 +1409,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         self.fwd_transforms[46] = self.transform_46; self.rev_transforms[46] = self.reverse_transform_46
         self.fwd_transforms[47] = self.transform_47; self.rev_transforms[47] = self.reverse_transform_47
 
-        # 48‑255: dynamic (XOR with seed) – second dynamic family (two algorithm family #2)
+        # 48‑255: dynamic (XOR with seed) – second dynamic family
         for i in range(48, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
@@ -1419,10 +1418,10 @@ class PAQJPCompressorTransform65535:                                    # Core c
         # 256: identity
         self.fwd_transforms[256] = self.transform_256; self.rev_transforms[256] = self.reverse_transform_256
 
-        # Safety check
+        # Safety check that every index 1‑256 is assigned
         for i in range(1, 257):
             if i not in self.fwd_transforms:
-                raise RuntimeError(f"Transform {i} missing!")
+                raise RuntimeError(f"Transform {i} missing!")           # Error if missing
 
     # ------------------------------------------------------------------
     # Build pair sequences – 65535 (256×256 minus identity)
@@ -1431,7 +1430,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         pairs = []
         for t1 in range(1, 257):
             for t2 in range(1, 257):
-                if t1 == 256 and t2 == 256:
+                if t1 == 256 and t2 == 256:                             # Skip identity‑identity
                     continue
                 pairs.append((t1, t2))
         return pairs
@@ -1439,50 +1438,50 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # Transformation by index (0‑65535)
     # ------------------------------------------------------------------
-    def get_transform_sequence(self, index: int) -> Tuple[int, ...]:    # Return transform sequence for a path index
+    def get_transform_sequence(self, index: int) -> Tuple[int, ...]:    # Get the sequence of transform indices for a path index
         if index < 0 or index > 65535:
             raise ValueError("Index must be 0..65535")
         if index == 0:
-            return ()
-        return self.sequences[index - 1]
+            return ()                                                   # Raw data
+        return self.sequences[index - 1]                                # Index 1 → first pair
 
-    def apply_transform_by_index(self, data: bytes, index: int) -> bytes:  # Apply forward transforms for given index
+    def apply_transform_by_index(self, data: bytes, index: int) -> bytes:  # Apply forward transforms for a given path index
         seq = self.get_transform_sequence(index)
         if not seq:
-            return data
+            return data                                                 # No transforms
         result = data
         for t in seq:
-            result = self.fwd_transforms[t](result)
+            result = self.fwd_transforms[t](result)                     # Apply each transform
         return result
 
-    def reverse_transform_by_index(self, data: bytes, index: int) -> bytes:  # Apply reverse transforms for given index
+    def reverse_transform_by_index(self, data: bytes, index: int) -> bytes:  # Apply reverse transforms for a given path index
         seq = self.get_transform_sequence(index)
         if not seq:
             return data
         result = data
-        for t in reversed(seq):
+        for t in reversed(seq):                                         # Apply in reverse order
             result = self.rev_transforms[t](result)
         return result
 
     # ------------------------------------------------------------------
     # Compression backends
     # ------------------------------------------------------------------
-    def _compress_backend(self, data: bytes) -> bytes:                  # Compress with best available backend (Zstd/PAQ/raw)
+    def _compress_backend(self, data: bytes) -> bytes:                  # Compress data using best available backend
         candidates = []
         if HAS_ZSTD:
             try:
-                candidates.append(zstd_cctx.compress(data))
+                candidates.append(zstd_cctx.compress(data))             # Zstd
             except:
                 pass
         if paq is not None:
             try:
-                candidates.append(paq.compress(data))
+                candidates.append(paq.compress(data))                   # PAQ
             except:
                 pass
-        candidates.append(data)
-        return min(candidates, key=len)
+        candidates.append(data)                                         # Raw fallback
+        return min(candidates, key=len)                                 # Return the shortest
 
-    def _decompress_backend(self, data: bytes) -> Optional[bytes]:      # Decompress with appropriate backend
+    def _decompress_backend(self, data: bytes) -> Optional[bytes]:      # Decompress data with appropriate backend
         if len(data) == 0:
             return b''
         if HAS_ZSTD:
@@ -1495,74 +1494,74 @@ class PAQJPCompressorTransform65535:                                    # Core c
                 return paq.decompress(data)
             except:
                 pass
-        return data
+        return data                                                     # Assume uncompressed if all fail
 
     # ------------------------------------------------------------------
     # Variable‑length header encoding / decoding
     # ------------------------------------------------------------------
-    def _encode_marker_single(self, t: int) -> bytes:                   # Encode a single transform index
+    def _encode_marker_single(self, t: int) -> bytes:                   # Encode a single transform index (1‑256)
         if t <= 252:
-            return bytes([t - 1])
-        return bytes([254, t - 253])
+            return bytes([t - 1])                                       # 0‑251 represent transforms 1‑252
+        return bytes([254, t - 253])                                    # 254 followed by 0‑3 for 253‑256
 
-    def _encode_marker_raw(self) -> bytes:                              # Raw data marker
-        return bytes([252])
+    def _encode_marker_raw(self) -> bytes:                              # Marker for raw data
+        return bytes([252])                                             # 252 means no transform
 
-    def _encode_marker_pair(self, t1: int, t2: int) -> bytes:           # Encode a pair index
-        idx = (t1 - 1) * 256 + (t2 - 1)
+    def _encode_marker_pair(self, t1: int, t2: int) -> bytes:           # Encode a pair (t1,t2)
+        idx = (t1 - 1) * 256 + (t2 - 1)                                 # Compute pair index 0‑65534
         if t1 == 256 and t2 == 256:
             raise ValueError("Identity pair excluded")
-        return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
+        return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])              # 253 + 2‑byte big‑endian index
 
-    def _decode_header(self, data: bytes):                              # Decode header, return (offset, sequence tuple)
+    def _decode_header(self, data: bytes):                              # Decode header, returns (offset, sequence tuple)
         if len(data) < 1:
             return 0, ()
-        f = data[0]
-        if f < 252:
-            return 1, (f + 1,)
-        elif f == 252:
+        f = data[0]                                                     # First marker byte
+        if f < 252:                                                     # Single transform
+            return 1, (f + 1,)                                          # offset 1, transform index = f+1
+        elif f == 252:                                                  # Raw
             return 1, ()
-        elif f == 253:
+        elif f == 253:                                                  # Pair
             if len(data) < 3:
                 return 0, ()
-            idx = (data[1] << 8) | data[2]
+            idx = (data[1] << 8) | data[2]                              # Pair index
             if idx >= len(self.sequences):
                 return 0, ()
-            t1, t2 = self.pair_lookup[idx]
-            return 3, (t1, t2)
-        elif f == 254:
+            t1, t2 = self.pair_lookup[idx]                              # Lookup pair
+            return 3, (t1, t2)                                          # offset 3, pair
+        elif f == 254:                                                  # Single transform 253‑256
             if len(data) < 2:
                 return 0, ()
             x = data[1]
             if x > 3:
                 return 0, ()
-            return 2, (253 + x,)
+            return 2, (253 + x,)                                        # offset 2, transform index 253+x
         else:
-            return 0, ()
+            return 0, ()                                                # Invalid
 
     # ------------------------------------------------------------------
     # Main compression – verifies every candidate
     # ------------------------------------------------------------------
-    def compress_with_best(self, data: bytes, ultra: bool = True) -> bytes:  # Find best transform (single or pair)
-        if not data:
+    def compress_with_best(self, data: bytes, ultra: bool = True) -> bytes:  # Compress using best transform among all candidates
+        if not data:                                                    # Empty data
             backend = self._compress_backend(b'')
             return self._encode_marker_raw() + backend
 
-        best_total = float('inf')
-        best_bytes = None
+        best_total = float('inf')                                       # Best compressed size
+        best_bytes = None                                               # Best compressed bytes
 
-        def try_candidate(transform_header: bytes, transformed_data: bytes):
+        def try_candidate(transform_header: bytes, transformed_data: bytes):  # Evaluate a candidate
             nonlocal best_total, best_bytes
             backend = self._compress_backend(transformed_data)
             candidate = transform_header + backend
-            decomp, _ = self._decompress_auto(candidate)
-            if decomp == data and len(candidate) < best_total:
+            decomp, _ = self._decompress_auto(candidate)                # Verify lossless
+            if decomp == data and len(candidate) < best_total:          # If correct and smaller
                 best_total = len(candidate)
                 best_bytes = candidate
 
-        try_candidate(self._encode_marker_raw(), data)
+        try_candidate(self._encode_marker_raw(), data)                  # Try raw data
 
-        for t in range(1, 257):
+        for t in range(1, 257):                                         # Try all single transforms
             try:
                 transformed = self.fwd_transforms[t](data)
                 header = self._encode_marker_single(t)
@@ -1570,7 +1569,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
             except:
                 continue
 
-        if ultra:
+        if ultra:                                                       # Ultra mode: try all 65535 pairs
             for t1, t2 in self.sequences:
                 try:
                     transformed = self.fwd_transforms[t1](data)
@@ -1580,25 +1579,25 @@ class PAQJPCompressorTransform65535:                                    # Core c
                 except:
                     continue
 
-        if best_bytes is None:
+        if best_bytes is None:                                          # Should never happen
             raise RuntimeError("Cannot compress this file in strict marker‑free mode.")
         return best_bytes
 
-    def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:
+    def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:  # Decompress and return (data, sequence used)
         offset, seq = self._decode_header(data)
         if offset == 0:
             return b'', None
-        payload = data[offset:]
+        payload = data[offset:]                                         # Data after header
         if not payload:
             return b'', None
-        res = self._decompress_backend(payload)
+        res = self._decompress_backend(payload)                         # Decompress backend
         if res is None:
             return b'', None
         try:
-            if not seq:
+            if not seq:                                                 # Raw
                 result = res
             else:
-                result = self._reverse_sequence(res, seq)
+                result = self._reverse_sequence(res, seq)              # Reverse transform sequence
         except:
             return b'', None
         return result, seq
@@ -1612,20 +1611,20 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # Exhaustive self‑test – checks ALL 65536 indices on a test byte
     # ------------------------------------------------------------------
-    def full_self_test(self) -> bool:
+    def full_self_test(self) -> bool:                                   # Run a full self‑test of all 65536 transform paths
         print("=" * 60)
         print("PAQJP 9.2 – Transform65535 CHECK (0‑65535)")
         print("=" * 60)
-        test_byte = 0xAA
+        test_byte = 0xAA                                                # Test byte value
         test_data = bytes([test_byte])
         print(f"Testing all 65536 transformation indices on byte 0x{test_byte:02X} ...")
 
         all_ok = True
-        for index in range(65536):
+        for index in range(65536):                                      # Iterate over all possible path indices
             try:
-                transformed = self.apply_transform_by_index(test_data, index)
-                restored = self.reverse_transform_by_index(transformed, index)
-                if restored != test_data:
+                transformed = self.apply_transform_by_index(test_data, index)  # Forward
+                restored = self.reverse_transform_by_index(transformed, index)  # Reverse
+                if restored != test_data:                               # Check for lossless
                     print(f"  FAIL: index {index}, seq {self.get_transform_sequence(index)}")
                     all_ok = False
                     break
@@ -1633,7 +1632,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
                 print(f"  EXCEPTION at index {index}: {e}")
                 all_ok = False
                 break
-            if index % 10000 == 0 and index > 0:
+            if index % 10000 == 0 and index > 0:                        # Progress update
                 print(f"  ... {index} indices tested OK")
 
         if all_ok:
@@ -1642,7 +1641,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
             print("\n[FAIL] Check failed.")
             return False
 
-        print("\nRandom 1000‑byte pipeline test...")
+        print("\nRandom 1000‑byte pipeline test...")                    # Additional test with random 1000‑byte data
         rng = random.Random(12345)
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
         try:
@@ -1662,10 +1661,10 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # File API
     # ------------------------------------------------------------------
-    def compress_file(self, infile: str, outfile: str, ultra: bool = True):
+    def compress_file(self, infile: str, outfile: str, ultra: bool = True):  # Compress a file
         try:
             with open(infile, 'rb') as f:
-                data = f.read()
+                data = f.read()                                         # Read input
         except Exception as e:
             print(f"Error reading file: {e}")
             return
@@ -1676,26 +1675,26 @@ class PAQJPCompressorTransform65535:                                    # Core c
             return
         try:
             with open(outfile, 'wb') as f:
-                f.write(compressed)
+                f.write(compressed)                                    # Write output
         except Exception as e:
             print(f"Error writing output file: {e}")
             return
         print(f"Compressed {len(data)} → {len(compressed)} bytes → {outfile}")
 
-    def decompress_file(self, infile: str, outfile: str):
+    def decompress_file(self, infile: str, outfile: str):              # Decompress a file
         try:
             with open(infile, 'rb') as f:
-                data = f.read()
+                data = f.read()                                         # Read compressed file
         except Exception as e:
             print(f"Error reading file: {e}")
             return
         original, seq = self._decompress_auto(data)
-        if original == b'' and seq is None:
+        if original == b'' and seq is None:                             # Decompression failed
             print("Decompression failed.")
             return
         try:
             with open(outfile, 'wb') as f:
-                f.write(original)
+                f.write(original)                                      # Write decompressed file
         except Exception as e:
             print(f"Error writing output file: {e}")
             return
@@ -1705,10 +1704,10 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # Constant Diapason bit‑string analysis
     # ------------------------------------------------------------------
-    def analyze_constant_diapason(self, filepath: str):
+    def analyze_constant_diapason(self, filepath: str):                # Analyze diapason compression on a file
         with open(filepath, 'rb') as f:
             data = f.read()
-        bits = []
+        bits = []                                                       # Convert file to bit list
         for byte in data:
             for i in range(7, -1, -1):
                 bits.append((byte >> i) & 1)
@@ -1723,7 +1722,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         best_pass = 0
         best_len = orig_len
         print("Round‑by‑round sizes:")
-        while pass_num < 255:
+        while pass_num < 255:                                           # Apply diapason passes
             pad_len = (4 - len(current_bits) % 4) % 4
             padded = current_bits + [0] * pad_len
             nibble_count = len(padded) // 4
@@ -1773,36 +1772,36 @@ class PAQJPCompressorTransform65535:                                    # Core c
     # ------------------------------------------------------------------
     # Block‑wise Transform 23 (0 … 8191 bits per block)
     # ------------------------------------------------------------------
-    def transform_23_blocks_compress(self, data: bytes, block_bits: int) -> bytes:
+    def transform_23_blocks_compress(self, data: bytes, block_bits: int) -> bytes:  # Compress in fixed‑size blocks
         if not data:
             return self.transform_23(data)
         total_bits = len(data) * 8
-        if block_bits == 0 or block_bits >= total_bits:
+        if block_bits == 0 or block_bits >= total_bits:                 # If whole file as one block
             return self.transform_23(data)
         bits = []
         for byte in data:
             for i in range(7, -1, -1):
                 bits.append((byte >> i) & 1)
         out = bytearray()
-        for start in range(0, total_bits, block_bits):
+        for start in range(0, total_bits, block_bits):                 # Process each block
             chunk = bits[start:start+block_bits]
             compressed = self._compress_bits(chunk)
             orig_bit_len = len(chunk)
-            out.append((orig_bit_len >> 8) & 0xFF)
+            out.append((orig_bit_len >> 8) & 0xFF)                      # Store original bit length (2 bytes)
             out.append(orig_bit_len & 0xFF)
             L = len(compressed)
-            out.append((L >> 8) & 0xFF)
+            out.append((L >> 8) & 0xFF)                                 # Store compressed length (2 bytes)
             out.append(L & 0xFF)
-            out.extend(compressed)
+            out.extend(compressed)                                      # Compressed data
         return bytes(out)
 
-    def transform_23_blocks_decompress(self, data: bytes) -> bytes:
+    def transform_23_blocks_decompress(self, data: bytes) -> bytes:    # Decompress block‑wise
         if not data:
             return b''
         pos = 0
         all_bits = []
         try:
-            while pos + 2 <= len(data):
+            while pos + 2 <= len(data):                                 # Read block header
                 orig_bit_len = (data[pos] << 8) | data[pos+1]
                 pos += 2
                 if pos + 2 > len(data):
@@ -1829,12 +1828,12 @@ class PAQJPCompressorTransform65535:                                    # Core c
                 return bytes(out_bytes)
         except:
             pass
-        return self.reverse_transform_23(data)
+        return self.reverse_transform_23(data)                          # Fallback to whole‑file decompress
 
     # ------------------------------------------------------------------
     # Find optimal block size for Transform 23 (0 … 8191 bits)
     # ------------------------------------------------------------------
-    def find_best_block_size_transform23(self, filepath: str):
+    def find_best_block_size_transform23(self, filepath: str):         # Brute‑force search for best block size
         with open(filepath, 'rb') as f:
             data = f.read()
         if not data:
@@ -1845,7 +1844,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
         print("Scanning block sizes 0 … 8191 bits …")
         best_size = None
         best_block_bits = -1
-        for block_bits in range(0, 8192):
+        for block_bits in range(0, 8192):                               # Test each block size
             if block_bits == 0:
                 compressed = self.transform_23(data)
             else:
@@ -1858,7 +1857,7 @@ class PAQJPCompressorTransform65535:                                    # Core c
                 print(f"  {block_bits} bits → {L} bytes (best so far: {best_block_bits} bits → {best_size} bytes)")
         print("\nBest block size: {} bits → {} bytes".format(best_block_bits, best_size))
         print("(block size 0 means whole file as single block)")
-        if best_block_bits == 0:
+        if best_block_bits == 0:                                        # Verify lossless
             compressed = self.transform_23(data)
             recovered = self.reverse_transform_23(compressed)
         else:
@@ -1873,33 +1872,33 @@ class PAQJPCompressorTransform65535:                                    # Core c
 # ------------------------------------------------------------
 # Main
 # ------------------------------------------------------------
-def main():                                                             # Interactive menu
+def main():                                                             # Interactive main menu
     print(f"{PROGNAME}")
     print("PAQJP 9.2 – 256 single + 65535 pairs = 65536 transform paths (indices 0‑65535)")
     if paq is None and not HAS_ZSTD:
         print("Warning: No backend compressor found – raw data will be stored.")
 
-    c = PAQJPCompressorTransform65535(repeat_count=100)
+    c = PAQJPCompressorTransform65535(repeat_count=100)                 # Create compressor instance
 
     choice = input("\n1) Compress   2) Decompress   3) Full self‑test (all 0‑65535)\n"
                    "4) Analyze bit‑string   5) Test transformation by index\n"
                    "6) Find optimal block size for Transform 23 (0‑8191 bits)\n> ").strip()
-    if choice == "1":
+    if choice == "1":                                                    # Compress
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
         mode = input("Choose mode: 1) Fast (256)  2) Ultra (65535 pairs)\n> ").strip()
         ultra = True if mode == "2" else False
         c.compress_file(i, o, ultra=ultra)
-    elif choice == "2":
+    elif choice == "2":                                                  # Decompress
         i = input("Compressed file: ").strip()
         o = input("Output file: ").strip() or i.rsplit('.', 1)[0] + ".orig"
         c.decompress_file(i, o)
-    elif choice == "3":
+    elif choice == "3":                                                  # Full self‑test
         c.full_self_test()
-    elif choice == "4":
+    elif choice == "4":                                                  # Analyze diapason
         fpath = input("File to analyze: ").strip()
         c.analyze_constant_diapason(fpath)
-    elif choice == "5":
+    elif choice == "5":                                                  # Test specific index
         try:
             idx = int(input("Transformation index (0‑65535): ").strip())
         except ValueError:
@@ -1920,11 +1919,11 @@ def main():                                                             # Intera
                 print(f"  0x{b:02X}: OK")
             else:
                 print(f"  0x{b:02X}: FAIL (got {dec.hex()})")
-    elif choice == "6":
+    elif choice == "6":                                                  # Find optimal block size
         fpath = input("File to test: ").strip()
         c.find_best_block_size_transform23(fpath)
     else:
         print("Invalid choice.")
 
-if __name__ == "__main__":                                              # Run main if executed directly
+if __name__ == "__main__":                                              # Entry point when script is executed directly
     main()
