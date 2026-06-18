@@ -37,7 +37,8 @@ PAQJP_8.5Long;
 PAQJP_8.6;
 PAQJP_8.8
 PAQJP_90b
-PAQJP_91,92
+PAQJP_91, 92
+PAQJPQ was compressed the file g4.txt.pjp
 
 
 All Hybrid software tested Software is working correctly without bugs and without Errors
