@@ -43,4 +43,4 @@ PAQJPQ was compressed the file g4.txt.pjp
 
 All Hybrid software tested Software is working correctly without bugs and without Errors
 
-The best our PAQJPQ I had done 2 day ago it compressed 100KB 100000 bytes g4.txt to 24KB 24355 bytes g4.txt.pjp
+The best our PAQJPQ it was compressed 100KB 100000 bytes g4.txt to 24KB 24355 bytes g4.txt.pjp
