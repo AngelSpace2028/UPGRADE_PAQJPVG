@@ -2210,10 +2210,11 @@ def main():
 
     elif choice == "2":
         i = input("Input file: ").strip()
+        # suggest default output name
         if i.endswith('.pjp'):
             default_out = i[:-4]
-        else: 
-            o = input("Output file: ").strip()
+        else:
+            default_out = i + ".orig"
         o = input("Output file: ").strip() or default_out
         c.decompress_file(i, o)
 
