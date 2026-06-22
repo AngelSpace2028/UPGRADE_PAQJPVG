@@ -30,8 +30,8 @@ Compression pipelines:
   1) Transform → Zstandard/PAQ backend (original)
   2) Transform → 0xFF marker → LZ77 (2 KB) → Huffman (literals + dist + len)
 
-(Fix: LZ77+Huffman decoder now uses actual maximum code lengths instead of
- hard‑coded 32 for distance/length lookups, preventing rare decoding failures.)
+(Fix: LZ77+Huffman decoder now uses 2‑byte code lengths for distance/length
+ alphabets, removing the 255‑limit that could crash the compressor.)
 """
 # Docstring describing the program's purpose, version, and available transformations
 
@@ -41,7 +41,7 @@ import decimal                    # For high-precision decimal arithmetic (pi)
 import hashlib                    # For SHA-256 hashing
 import base64                     # For Base64 encoding/decoding
 import heapq                      # For priority queue in Huffman coding
-import struct                     # For packing/unpacking binary data (token count)
+import struct                     # For packing/unpacking binary data (token count, code lengths)
 import os                         # For atomic file rename
 import tempfile                   # For temporary files (atomic write)
 from datetime import datetime     # For timestamp in automatic filenames
@@ -1703,7 +1703,9 @@ class PAQJPCompressorTransform65535:
         return bytes(out)
 
     def _encode_lzh(self, data: bytes) -> bytes:
-        # Compress data with LZ77 + Huffman
+        # Compress data with LZ77 + Huffman.
+        # Code lengths for distance & length alphabets are stored as 2‑byte big‑endian
+        # to allow values up to 65535 (theoretically up to 2048 for 2049 symbols).
         tokens = self._lz77_tokenize(data)
         lit_freq = [0] * 256
         dist_freq = [0] * (self.MAX_DIST + 1)
@@ -1748,12 +1750,13 @@ class PAQJPCompressorTransform65535:
         pad = (8 - len(bits) % 8) % 8
         bits.extend([0] * pad)
 
-        def pack_lengths(lengths: List[int]) -> bytes:
-            return bytes(lengths)
+        # Store code lengths as 2‑byte big‑endian for each alphabet
+        def pack_lengths_16(lengths: List[int]) -> bytes:
+            return b''.join(struct.pack('>H', l) for l in lengths)
 
-        lit_len_bytes = pack_lengths(lit_cl)
-        dist_len_bytes = pack_lengths(dist_cl)
-        len_len_bytes = pack_lengths(len_cl)
+        lit_len_bytes = pack_lengths_16(lit_cl)
+        dist_len_bytes = pack_lengths_16(dist_cl)
+        len_len_bytes = pack_lengths_16(len_cl)
 
         header = bytearray()
         header.extend(lit_len_bytes)
@@ -1769,13 +1772,20 @@ class PAQJPCompressorTransform65535:
         return bytes(out)
 
     def _decode_lzh(self, data: bytes) -> Optional[bytes]:
-        """Decompress LZ77+Huffman stream. Fixed to use actual maximum code lengths."""
-        if len(data) < 256 + 2049 + 2049:
+        """Decompress LZ77+Huffman stream. Code lengths are read as 2‑byte big‑endian."""
+        # Header sizes: lit 256*2, dist 2049*2, len 2049*2
+        LIT_LEN_BYTES = 256 * 2
+        DIST_LEN_BYTES = 2049 * 2
+        LEN_LEN_BYTES = 2049 * 2
+        if len(data) < LIT_LEN_BYTES + DIST_LEN_BYTES + LEN_LEN_BYTES:
             return None
         pos = 0
-        lit_cl = list(data[pos:pos+256]); pos += 256
-        dist_cl = list(data[pos:pos+2049]); pos += 2049
-        len_cl = list(data[pos:pos+2049]); pos += 2049
+        lit_cl = [struct.unpack('>H', data[i:i+2])[0] for i in range(pos, pos+LIT_LEN_BYTES, 2)]
+        pos += LIT_LEN_BYTES
+        dist_cl = [struct.unpack('>H', data[i:i+2])[0] for i in range(pos, pos+DIST_LEN_BYTES, 2)]
+        pos += DIST_LEN_BYTES
+        len_cl = [struct.unpack('>H', data[i:i+2])[0] for i in range(pos, pos+LEN_LEN_BYTES, 2)]
+        pos += LEN_LEN_BYTES
 
         def build_decode_table(lengths: List[int]) -> Dict[Tuple[int, int], int]:
             # Build a canonical Huffman decoding table
@@ -1803,7 +1813,7 @@ class PAQJPCompressorTransform65535:
         dist_decode = build_decode_table(dist_cl)
         len_decode = build_decode_table(len_cl)
 
-        # Compute maximum code lengths actually used – avoids hardcoded 32-bit limit
+        # Compute maximum code lengths actually used
         max_lit_bits = max(lit_cl) if any(lit_cl) else 0
         max_dist_bits = max(dist_cl) if any(dist_cl) else 0
         max_len_bits = max(len_cl) if any(len_cl) else 0
