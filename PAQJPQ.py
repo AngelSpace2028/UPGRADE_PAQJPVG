@@ -29,8 +29,8 @@ Compression pipelines:
 1. Transform → Zstandard/PAQ backend (original)
 2. Transform → 0xFF marker → LZ77 (2 KB) → Huffman (literals + dist + len)
 
-(Fix: LZ77+Huffman decoder now uses actual maximum code lengths instead of 
-hard‑coded 32 for distance/length lookups, preventing rare decoding failures.) 
+(Fix: LZ77+Huffman decoder now uses 2‑byte code lengths for distance/length
+to avoid the rare overflow crash, and stores them as 2‑byte integers.)
 """
 
 import math
@@ -1626,12 +1626,10 @@ class PAQJPCompressorTransform65535:
         pad = (8 - len(bits) % 8) % 8
         bits.extend([0] * pad)
 
-        def pack_lengths(lengths: List[int]) -> bytes:
-            return bytes(lengths)
-
-        lit_len_bytes = pack_lengths(lit_cl)
-        dist_len_bytes = pack_lengths(dist_cl)
-        len_len_bytes = pack_lengths(len_cl)
+        # --- Pack lengths (fix: use 2‑byte entries for dist & len to avoid overflow) ---
+        lit_len_bytes = bytes(lit_cl)                         # 256 bytes
+        dist_len_bytes = b''.join(struct.pack('>H', cl) for cl in dist_cl)  # 4098 bytes
+        len_len_bytes = b''.join(struct.pack('>H', cl) for cl in len_cl)    # 4098 bytes
 
         header = bytearray()
         header.extend(lit_len_bytes)
@@ -1647,12 +1645,26 @@ class PAQJPCompressorTransform65535:
         return bytes(out)
 
     def _decode_lzh(self, data: bytes) -> Optional[bytes]:
-        if len(data) < 256 + 2049 + 2049:
+        # Need at least 256 + 2049*2 + 2049*2 bytes for header
+        if len(data) < 256 + 2*2049 + 2*2049:
             return None
         pos = 0
+        # read literal code lengths (1 byte each)
         lit_cl = list(data[pos:pos+256]); pos += 256
-        dist_cl = list(data[pos:pos+2049]); pos += 2049
-        len_cl = list(data[pos:pos+2049]); pos += 2049
+
+        # read distance code lengths (2 bytes each, big-endian)
+        dist_cl = []
+        for _ in range(self.MAX_DIST + 1):
+            if pos + 2 > len(data): return None
+            dist_cl.append((data[pos] << 8) | data[pos+1])
+            pos += 2
+
+        # read length code lengths (2 bytes each)
+        len_cl = []
+        for _ in range(self.MAX_MATCH + 1):
+            if pos + 2 > len(data): return None
+            len_cl.append((data[pos] << 8) | data[pos+1])
+            pos += 2
 
         def build_decode_table(lengths: List[int]) -> Dict[Tuple[int, int], int]:
             symbols = list(range(len(lengths)))
