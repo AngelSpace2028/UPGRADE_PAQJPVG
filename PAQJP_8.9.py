@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 8.8 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
+PAQJP 8.9 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 (Auto‑correcting backends – marker‑free by default, safe fallback if needed)
 ============================================================================
 
@@ -9,8 +9,8 @@ All single transforms (1‑256), all ordered pairs (52×52=2704), and the raw
 (no‑transform) path are mathematically lossless.  Every transform has a
 perfect inverse.
 
-ADDED: Transform 26 – SHA‑256 based block‑wise masking (0‑1024 byte blocks)
-with simple "right/incorrect" losslessness print.
+ADDED: Transform 26 – SHA‑256 based block‑wise masking (0‑1024 byte blocks).
+Startup verification prints "Transform X: right" for every transform (1‑256).
 
 Usage:
     python paqjp89.py
@@ -574,32 +574,23 @@ class PAQJPCompressor:
         return bytes(t)
 
     # ------------------------------------------------------------------
-    # Transform 26 – SHA‑256 block masking with simple "right/incorrect"
+    # Transform 26 – SHA‑256 block masking (no per‑block prints)
     # ------------------------------------------------------------------
     def transform_26(self, data: bytes) -> bytes:
-        """Encrypt/decrypt by XOR with SHA‑256 hash of block index.
-        Prints "right" or "incorrect" per block to verify losslessness."""
+        """Encrypt/decrypt by XOR with SHA‑256 hash of block index."""
         if not data:
             return b''
         secret = b"PAQJP_TRANSFORM26_SECRET"
         result = bytearray()
-        print("Transform 26: block verification")
         for idx in range(0, len(data), BLOCK_SIZE):
             chunk = data[idx:idx+BLOCK_SIZE]
             block_num = idx // BLOCK_SIZE
-            # Generate mask: SHA‑256(secret + block index)
             hasher = hashlib.sha256()
             hasher.update(secret)
             hasher.update(struct.pack(">Q", block_num))
             mask = hasher.digest()
             mask_repeated = (mask * ((len(chunk) // len(mask)) + 1))[:len(chunk)]
             xored = bytes(a ^ b for a, b in zip(chunk, mask_repeated))
-            # Verify losslessness: reverse (same function) and check
-            reversed_chunk = bytes(a ^ b for a, b in zip(xored, mask_repeated))
-            if reversed_chunk == chunk:
-                print(f"  Block {block_num}: right")
-            else:
-                print(f"  Block {block_num}: incorrect")
             result.extend(xored)
         return bytes(result)
 
@@ -891,7 +882,30 @@ class PAQJPCompressor:
         return result, seq
 
     # ------------------------------------------------------------------
-    # Exhaustive self‑test (now includes transform 26)
+    # Transform verification (called once at startup)
+    # ------------------------------------------------------------------
+    def verify_transforms(self) -> bool:
+        """Check every transform (1‑256) on a test byte and print result."""
+        print("Verifying all 256 transforms...")
+        ok = True
+        for t in range(1, 257):
+            test = bytes([0x55])  # arbitrary byte
+            try:
+                enc = self.fwd_transforms[t](test)
+                dec = self.rev_transforms[t](enc)
+                if dec == test:
+                    print(f"Transform {t}: right")
+                else:
+                    print(f"Transform {t}: incorrect")
+                    ok = False
+            except Exception:
+                print(f"Transform {t}: exception")
+                ok = False
+        print("Verification complete.\n")
+        return ok
+
+    # ------------------------------------------------------------------
+    # Exhaustive self‑test (option 3)
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
@@ -977,7 +991,7 @@ class PAQJPCompressor:
         return True
 
     # ------------------------------------------------------------------
-    # File API – size printing already included
+    # File API
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True):
         try:
@@ -993,7 +1007,6 @@ class PAQJPCompressor:
         except Exception as e:
             print(f"Error writing output file: {e}")
             return
-        # Prints original and compressed sizes
         print(f"Compressed {len(data)} → {len(compressed)} bytes → {outfile}")
 
     def decompress_file(self, infile: str, outfile: str):
@@ -1014,7 +1027,6 @@ class PAQJPCompressor:
             print(f"Error writing output file: {e}")
             return
         seq_str = "raw" if not seq else f"sequence {seq}"
-        # Prints decompressed size
         print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
 
 # ------------------------------------------------------------
@@ -1023,11 +1035,12 @@ class PAQJPCompressor:
 def main():
     print(f"{PROGNAME}")
     print("256 single transforms + 2704 transform‑pair sequences (100% lossless).")
-    print("Transform 26: SHA‑256 block masking (0‑1024 bytes) – prints 'right' or 'incorrect' per block.")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Data will be stored raw.")
 
     c = PAQJPCompressor()
+    # Run startup verification of all transforms
+    c.verify_transforms()
 
     choice = input("\n1) Compress   2) Decompress   3) Full self‑test\n> ").strip()
     if choice == "1":
