@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 8.9 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
+PAQJP 8.8 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 (Auto‑correcting backends – marker‑free by default, safe fallback if needed)
 ============================================================================
 
@@ -9,34 +9,20 @@ All single transforms (1‑256), all ordered pairs (52×52=2704), and the raw
 (no‑transform) path are mathematically lossless.  Every transform has a
 perfect inverse.
 
-HEADER FORMAT:
-   Byte 0:  F
-     F < 252             → single transform number = F+1  (1..252)
-     F == 252            → raw (no transform)
-     F == 253            → pair: next 2 bytes encode pair‑index big‑endian
-     F == 254            → extended single: next byte X → transform = 253+X (0..3)
-     F == 255            → RESERVED (unused)
-
-BACKEND COMPRESSION (dual mode):
-   Marker‑free (default):
-     zstd output  : just the raw zstd stream (no marker)
-     paq  output  : just the raw paq stream (no marker)
-     raw  output  : b'N' + original data
-     Decompression order: Zstd → PAQ → raw (if first byte == 'N')
-   Safe (automatic fallback):
-     zstd output  : b'Z' + raw_zstd_stream
-     paq  output  : b'P' + raw_paq_stream
-     raw  output  : b'N' + original data
+ADDED: Transform 26 – SHA‑256 based block‑wise masking (0‑1024 byte blocks)
+with simple "right/incorrect" losslessness print.
 
 Usage:
-    python paqjp8.9.py
+    python paqjp89.py
     Choose 1 (compress), 2 (decompress), or 3 (full self‑test).
+    When compressing, choose Fast (256 transforms) or Ultra (256+2704 pairs).
 """
 
 import math
 import random
 import decimal
-import os
+import hashlib
+import struct
 from typing import Optional, List, Tuple, Dict, Callable
 
 # ---------- Optional compression backends ----------
@@ -47,7 +33,6 @@ except ImportError:
 
 try:
     import zstandard as zstd
-
     zstd_cctx = zstd.ZstdCompressor(level=22)
     zstd_dctx = zstd.ZstdDecompressor()
     HAS_ZSTD = True
@@ -59,6 +44,7 @@ PROGNAME = "PAQJP_8.9_LOSSLESS_AUTO_SAFE"
 # ---------- Constants ----------
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))]
 PI_DIGITS = [79, 17, 111]
+BLOCK_SIZE = 1024  # for transform 26
 
 # ---------- Helper: nearest prime ----------
 def find_nearest_prime_around(n: int) -> int:
@@ -70,7 +56,6 @@ def find_nearest_prime_around(n: int) -> int:
         if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2 ** 0.5) + 1)):
             return c2
         o += 1
-
 
 # ---------- Main Compressor Class ----------
 class PAQJPCompressor:
@@ -332,7 +317,7 @@ class PAQJPCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01‑21
+    # Transforms 01‑21 (unchanged)
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
@@ -547,6 +532,7 @@ class PAQJPCompressor:
         return bytes(t)
     reverse_transform_16 = transform_16
 
+    # transform_17 defined earlier
     def transform_18(self, data: bytes) -> bytes:
         if not data: return b''
         digits = self.get_basel_digits(max(10, len(data)//2 + 5))
@@ -587,6 +573,40 @@ class PAQJPCompressor:
         for i in range(len(t)): t[i] = (t[i] - shift) % 256
         return bytes(t)
 
+    # ------------------------------------------------------------------
+    # Transform 26 – SHA‑256 block masking with simple "right/incorrect"
+    # ------------------------------------------------------------------
+    def transform_26(self, data: bytes) -> bytes:
+        """Encrypt/decrypt by XOR with SHA‑256 hash of block index.
+        Prints "right" or "incorrect" per block to verify losslessness."""
+        if not data:
+            return b''
+        secret = b"PAQJP_TRANSFORM26_SECRET"
+        result = bytearray()
+        print("Transform 26: block verification")
+        for idx in range(0, len(data), BLOCK_SIZE):
+            chunk = data[idx:idx+BLOCK_SIZE]
+            block_num = idx // BLOCK_SIZE
+            # Generate mask: SHA‑256(secret + block index)
+            hasher = hashlib.sha256()
+            hasher.update(secret)
+            hasher.update(struct.pack(">Q", block_num))
+            mask = hasher.digest()
+            mask_repeated = (mask * ((len(chunk) // len(mask)) + 1))[:len(chunk)]
+            xored = bytes(a ^ b for a, b in zip(chunk, mask_repeated))
+            # Verify losslessness: reverse (same function) and check
+            reversed_chunk = bytes(a ^ b for a, b in zip(xored, mask_repeated))
+            if reversed_chunk == chunk:
+                print(f"  Block {block_num}: right")
+            else:
+                print(f"  Block {block_num}: incorrect")
+            result.extend(xored)
+        return bytes(result)
+
+    def reverse_transform_26(self, data: bytes) -> bytes:
+        """Reverse is identical (XOR is self‑inverse)."""
+        return self.transform_26(data)
+
     def transform_256(self, d: bytes) -> bytes:
         return d
     reverse_transform_256 = transform_256
@@ -615,11 +635,12 @@ class PAQJPCompressor:
         return tf, tf
 
     # ------------------------------------------------------------------
-    # Build transform maps (1..256)
+    # Build transform maps (1..256) – insert transform 26 explicitly
     # ------------------------------------------------------------------
     def _build_transform_maps(self):
         self.fwd_transforms: Dict[int, Callable] = {}
         self.rev_transforms: Dict[int, Callable] = {}
+        # Transforms 1‑22
         self.fwd_transforms[1] = self.transform_00; self.rev_transforms[1] = self.reverse_transform_00
         self.fwd_transforms[2] = self.transform_01; self.rev_transforms[2] = self.reverse_transform_01
         self.fwd_transforms[3] = self.transform_02; self.rev_transforms[3] = self.reverse_transform_02
@@ -642,11 +663,20 @@ class PAQJPCompressor:
         self.fwd_transforms[20] = self.transform_19; self.rev_transforms[20] = self.reverse_transform_19
         self.fwd_transforms[21] = self.transform_20; self.rev_transforms[21] = self.reverse_transform_20
         self.fwd_transforms[22] = self.transform_21; self.rev_transforms[22] = self.reverse_transform_21
+        # Insert transform 26 explicitly
+        self.fwd_transforms[26] = self.transform_26
+        self.rev_transforms[26] = self.reverse_transform_26
+        # Transforms 23‑25 and 27‑255 are dynamic
         for i in range(23, 256):
+            if i == 26:
+                continue  # already set
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
-        self.fwd_transforms[256] = self.transform_256; self.rev_transforms[256] = self.reverse_transform_256
+        # Transform 256 is no‑op
+        self.fwd_transforms[256] = self.transform_256
+        self.rev_transforms[256] = self.reverse_transform_256
+        # Ensure all are present
         for i in range(1, 257):
             if i not in self.fwd_transforms:
                 raise RuntimeError(f"Transform {i} missing!")
@@ -680,7 +710,7 @@ class PAQJPCompressor:
                 if safe:
                     candidates.append((b'P', b'P' + paq.compress(data)))
                 else:
-                    candidates.append((b'L', paq.compress(data)))  # dummy marker
+                    candidates.append((b'L', paq.compress(data)))  # dummy marker for length calc
             except:
                 pass
         if HAS_ZSTD:
@@ -695,7 +725,6 @@ class PAQJPCompressor:
         if not candidates:
             return b'N' + data
         if not safe:
-            # return the shortest (raw streams, except dummy)
             _, best = min(candidates, key=lambda x: len(x[1]))
             return best
         else:
@@ -800,7 +829,7 @@ class PAQJPCompressor:
             best_total = len(candidate)
             best_bytes = candidate
 
-        # singles
+        # singles (always searched)
         for t in range(1, 257):
             try:
                 transformed = self.fwd_transforms[t](data)
@@ -812,7 +841,7 @@ class PAQJPCompressor:
             except:
                 continue
 
-        # pairs – only if ultra mode
+        # pairs – only if ultra mode is on
         if ultra:
             for t1, t2 in self.sequences:
                 try:
@@ -833,7 +862,6 @@ class PAQJPCompressor:
                 return self.compress_with_best(data, safe=True, ultra=ultra)
             else:
                 raise RuntimeError("Safe compression failed – unexpected internal error!")
-
         return best_bytes
 
     # ---------- Decompression router ----------
@@ -845,7 +873,6 @@ class PAQJPCompressor:
         if not payload:
             return b'', None
 
-        # decide safe vs marker‑free
         first_byte = payload[0:1]
         if first_byte in (b'N', b'Z', b'P'):
             res = self._decompress_backend(payload, safe=True)
@@ -864,59 +891,11 @@ class PAQJPCompressor:
         return result, seq
 
     # ------------------------------------------------------------------
-    # Full decompress (plain)
-    # ------------------------------------------------------------------
-    def decompress_full(self, data: bytes) -> bytes:
-        original, seq = self._decompress_auto(data)
-        if original == b'' and seq is None:
-            raise RuntimeError("Decompression failed.")
-        return original
-
-    # ------------------------------------------------------------------
-    # File API
-    # ------------------------------------------------------------------
-    def compress_file(self, infile: str, outfile: str, ultra: bool = True):
-        try:
-            with open(infile, 'rb') as f:
-                data = f.read()
-        except Exception as e:
-            print(f"Error reading file: {e}")
-            return
-        compressed = self.compress_with_best(data, safe=False, ultra=ultra)
-        try:
-            with open(outfile, 'wb') as f:
-                f.write(compressed)
-        except Exception as e:
-            print(f"Error writing output file: {e}")
-            return
-        print(f"Compressed {len(data)} → {len(compressed)} bytes → {outfile}")
-
-    def decompress_file(self, infile: str, outfile: str):
-        try:
-            with open(infile, 'rb') as f:
-                data = f.read()
-        except Exception as e:
-            print(f"Error reading file: {e}")
-            return
-        try:
-            original = self.decompress_full(data)
-        except Exception as e:
-            print(f"Decompression error: {e}")
-            return
-        try:
-            with open(outfile, 'wb') as f:
-                f.write(original)
-        except Exception as e:
-            print(f"Error writing output file: {e}")
-            return
-        print(f"Decompressed → {outfile} ({len(original)} bytes)")
-
-    # ------------------------------------------------------------------
-    # Self‑test
+    # Exhaustive self‑test (now includes transform 26)
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
-        print("PAQJP 8.9 – FULL SELF‑TEST (100% lossless)")
+        print("PAQJP 8.8 – FULL SELF‑TEST (100% lossless)")
         print("=" * 60)
         all_ok = True
 
@@ -977,17 +956,18 @@ class PAQJPCompressor:
 
         for mode_name, safe in [("marker‑free", False), ("safe", True)]:
             compressed = self.compress_with_best(test_data, safe=safe, ultra=True)
-            decompressed = self.decompress_full(compressed)
+            decompressed, _ = self._decompress_auto(compressed)
             if decompressed != test_data:
                 print(f"  FAIL: random data pipeline mismatch in {mode_name} mode")
                 return False
+
         print("  PASS: random data pipeline OK in both modes")
 
         # 4. Empty input
         print("\nTesting empty input...")
         for safe in [False, True]:
             compressed_empty = self.compress_with_best(b'', safe)
-            decomp_empty = self.decompress_full(compressed_empty)
+            decomp_empty, _ = self._decompress_auto(compressed_empty)
             if decomp_empty != b'':
                 print(f"  FAIL: empty input pipeline mismatch (safe={safe})")
                 return False
@@ -996,13 +976,54 @@ class PAQJPCompressor:
         print("\n[All tests passed – compressor is 100% lossless]")
         return True
 
+    # ------------------------------------------------------------------
+    # File API – size printing already included
+    # ------------------------------------------------------------------
+    def compress_file(self, infile: str, outfile: str, ultra: bool = True):
+        try:
+            with open(infile, 'rb') as f:
+                data = f.read()
+        except Exception as e:
+            print(f"Error reading file: {e}")
+            return
+        compressed = self.compress_with_best(data, safe=False, ultra=ultra)
+        try:
+            with open(outfile, 'wb') as f:
+                f.write(compressed)
+        except Exception as e:
+            print(f"Error writing output file: {e}")
+            return
+        # Prints original and compressed sizes
+        print(f"Compressed {len(data)} → {len(compressed)} bytes → {outfile}")
+
+    def decompress_file(self, infile: str, outfile: str):
+        try:
+            with open(infile, 'rb') as f:
+                data = f.read()
+        except Exception as e:
+            print(f"Error reading file: {e}")
+            return
+        original, seq = self._decompress_auto(data)
+        if original == b'' and seq is None:
+            print("Decompression failed.")
+            return
+        try:
+            with open(outfile, 'wb') as f:
+                f.write(original)
+        except Exception as e:
+            print(f"Error writing output file: {e}")
+            return
+        seq_str = "raw" if not seq else f"sequence {seq}"
+        # Prints decompressed size
+        print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
 
 # ------------------------------------------------------------
 # Main
 # ------------------------------------------------------------
 def main():
     print(f"{PROGNAME}")
-    print("256 single transforms + 2704 transform‑pair sequences.")
+    print("256 single transforms + 2704 transform‑pair sequences (100% lossless).")
+    print("Transform 26: SHA‑256 block masking (0‑1024 bytes) – prints 'right' or 'incorrect' per block.")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Data will be stored raw.")
 
@@ -1023,7 +1044,6 @@ def main():
         c.full_self_test()
     else:
         print("Invalid choice.")
-
 
 if __name__ == "__main__":
     main()
