@@ -37,7 +37,7 @@ PAQJP_8.5Long;
 PAQJP_8.6;
 PAQJP_8.8;
 PAQJP_8.9;
-PAQJP_9.0 Dictionaries link downlod before compress https://drive.google.com/file/d/1Fi0yUBekv5J_eMrhPHcVL2iFcHqFvlyD/view?usp=drivesdk
+PAQJP_9.0
 
 
 All Hybrid software tested Software is working correctly without bugs and without Errors
