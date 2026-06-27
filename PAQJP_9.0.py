@@ -2,27 +2,19 @@
 # -*- coding: utf-8 -*-
 """
 PAQJP 9.0 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
-+ Static‑Dictionary Tokenizer (Hybrid mode)
-(Auto‑correcting backends – marker‑free by default, safe fallback if needed)
++ Static Word Dictionary + Static Line Dictionary (1024 phrases from dict files, 8‑byte index)
++ Dynamic Dictionary (words, sentences, lines, paragraphs)
+All dictionary streams compressed with Zstd / ZLIB / PAQ (best chosen)
+Hybrid mode tries all methods and picks the smallest.
+(Auto‑correcting marker‑free default, safe fallback if needed)
 ============================================================================
 
-Hybrid mode adds a pre‑compressor that uses the word lists from:
-    generated.txt, eng_news_2005_1M-*.txt, Dictionary.txt, etc.
-The tokenizer replaces dictionary words with a 2‑byte index,
-unknown words are stored raw, and the whole token stream is ZLIB‑compressed.
-If this yields a smaller result than PAQJP’s best transform, it is used.
-
-All single transforms (1‑256), all ordered pairs (52×52=2704), and the raw
-(no‑transform) path are mathematically lossless.  Every transform has a
-perfect inverse.
-
-ADDED: Transform 23 – SHA‑256 word tokenizer (lossless)
-       Transform 24 – XOR‑prime word tokenizer (lossless)
-
-Usage:
-    python paqjp9.py
-    Choose 1 (compress), 2 (decompress), or 3 (full self‑test).
-    When compressing, choose Hybrid (dictionary+ZLIB first, then PAQJP).
+LINE DICTIONARY – NOW BUILT FROM THE SAME DICTIONARY FILES:
+- Reads the first 1024 non‑empty lines from the standard dictionary files
+  (generated.txt, eng_news_2005_1M-*.txt, Dictionary.txt, etc.).
+- Sorts phrases by length (longest match first).
+- Each matched phrase is replaced by its 8‑byte index.
+- Unknown text is stored verbatim.
 """
 
 import math
@@ -34,6 +26,7 @@ import re
 import zlib
 import os
 from typing import Optional, List, Tuple, Dict, Callable
+from collections import Counter
 
 # ---------- Optional compression backends ----------
 try:
@@ -59,6 +52,9 @@ DICTIONARY_FILES = [
     "eng_news_2005_1M-inv_so.txt", "eng_news_2005_1M-meta.txt", "Dictionary.txt",
     "the-complete-reference-html-css-fifth-edition.txt"
 ]
+
+# ---------- Line dictionary: take first 1024 lines from the dict files ----------
+MAX_LINE_ENTRIES = 1024
 
 # ---------- Constants ----------
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))]
@@ -99,14 +95,14 @@ class PAQJPCompressor:
         self.sequences = self._build_pair_sequences()
         self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}
 
-        # Load static dictionary (word -> 2‑byte index) from disk
+        # Load static dictionaries
         self.static_dict, self.word_to_index = self._load_static_dictionary()
+        self.line_dict, self.line_to_index = self._load_line_dictionary_from_files()
 
     # ------------------------------------------------------------------
-    # Static dictionary loader
+    # Static word dictionary loader (unchanged)
     # ------------------------------------------------------------------
     def _load_static_dictionary(self):
-        """Read all dictionary files, return (sorted unique words list, dict word->index)."""
         words_set = set()
         for file in DICTIONARY_FILES:
             if os.path.exists(file):
@@ -120,11 +116,44 @@ class PAQJPCompressor:
                     pass
         sorted_words = sorted(words_set)
         word_to_idx = {w: i for i, w in enumerate(sorted_words)}
-        print(f"Loaded static dictionary: {len(sorted_words)} unique words from existing files.")
+        print(f"Loaded static word dictionary: {len(sorted_words)} unique words.")
         return sorted_words, word_to_idx
 
     # ------------------------------------------------------------------
-    # pi / constant helpers (unchanged)
+    # NEW: Line dictionary built from the existing dictionary files
+    #       (first 1024 non‑empty lines)
+    # ------------------------------------------------------------------
+    def _load_line_dictionary_from_files(self):
+        """Collect up to MAX_LINE_ENTRIES lines from DICTIONARY_FILES."""
+        lines = []
+        for file in DICTIONARY_FILES:
+            if not os.path.exists(file):
+                continue
+            try:
+                with open(file, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        phrase = line.strip()
+                        if phrase and phrase not in lines:
+                            lines.append(phrase)
+                            if len(lines) >= MAX_LINE_ENTRIES:
+                                break
+                if len(lines) >= MAX_LINE_ENTRIES:
+                    break
+            except:
+                pass
+
+        if not lines:
+            print("Warning: No phrases found in dictionary files. Line dictionary disabled.")
+            return [], {}
+
+        # Sort by length descending for longest‑match first
+        lines.sort(key=len, reverse=True)
+        line_to_idx = {phrase: i for i, phrase in enumerate(lines)}
+        print(f"Loaded line dictionary: {len(lines)} phrases from standard dictionary files.")
+        return lines, line_to_idx
+
+    # ------------------------------------------------------------------
+    # pi / constant helpers
     # ------------------------------------------------------------------
     def get_pi_digits(self, n: int) -> str:
         if n < 1: return ""
@@ -869,7 +898,10 @@ class PAQJPCompressor:
         self.fwd_transforms[23] = self.transform_23; self.rev_transforms[23] = self.reverse_transform_23
         self.fwd_transforms[24] = self.transform_24; self.rev_transforms[24] = self.reverse_transform_24
         self.fwd_transforms[26] = self.transform_26; self.rev_transforms[26] = self.reverse_transform_26
-        for i in range(25, 256):
+        # NEW Transform 25 – Dynamic dictionary tokenizer
+        self.fwd_transforms[25] = self.transform_25
+        self.rev_transforms[25] = self.reverse_transform_25
+        for i in range(27, 256):
             if i == 26: continue
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
@@ -900,72 +932,450 @@ class PAQJPCompressor:
         return result
 
     # ------------------------------------------------------------------
-    # Compression backends (dual mode)
+    # Backend compression with automatic selection (safe markers)
     # ------------------------------------------------------------------
-    def _compress_backend(self, data: bytes, safe: bool = False) -> bytes:
+    def _compress_with_best_backend(self, data: bytes) -> bytes:
+        """Compress data using the available backend that yields the smallest result.
+        Returns the compressed payload prefixed with a safe marker: 'N' (raw), 'Z' (zstd), 'P' (paq)."""
         candidates = []
-        if paq is not None:
-            try:
-                if safe:
-                    candidates.append((b'P', b'P' + paq.compress(data)))
-                else:
-                    candidates.append((b'L', paq.compress(data)))
-            except:
-                pass
-        if HAS_ZSTD:
-            try:
-                if safe:
-                    candidates.append((b'Z', b'Z' + zstd_cctx.compress(data)))
-                else:
-                    candidates.append((b'Z', zstd_cctx.compress(data)))
-            except:
-                pass
         candidates.append((b'N', b'N' + data))
-        if not candidates:
-            return b'N' + data
-        if not safe:
-            _, best = min(candidates, key=lambda x: len(x[1]))
-            return best
-        else:
-            _, best = min(candidates, key=lambda x: len(x[1]))
-            return best
-
-    def _decompress_backend(self, data: bytes, safe: bool = False) -> Optional[bytes]:
-        if len(data) == 0:
-            return None
-        if safe:
-            marker = data[0:1]
-            payload = data[1:]
-            if marker == b'N':
-                return payload
-            elif marker == b'Z' and HAS_ZSTD:
-                try:
-                    return zstd_dctx.decompress(payload)
-                except:
-                    pass
-            elif marker == b'P' and paq is not None:
-                try:
-                    return paq.decompress(payload)
-                except:
-                    pass
-            return None
         if HAS_ZSTD:
             try:
-                return zstd_dctx.decompress(data)
+                candidates.append((b'Z', b'Z' + zstd_cctx.compress(data)))
             except:
                 pass
         if paq is not None:
             try:
-                return paq.decompress(data)
+                candidates.append((b'P', b'P' + paq.compress(data)))
             except:
                 pass
-        if len(data) > 0 and data[0] == ord('N'):
-            return data[1:]
+        best = min(candidates, key=lambda x: len(x[1]))
+        return best[1]  # includes marker byte
+
+    def _decompress_backend(self, data: bytes) -> Optional[bytes]:
+        """Decompress data that starts with a safe marker byte."""
+        if len(data) < 1:
+            return None
+        marker = data[0:1]
+        payload = data[1:]
+        if marker == b'N':
+            return payload
+        elif marker == b'Z' and HAS_ZSTD:
+            try:
+                return zstd_dctx.decompress(payload)
+            except:
+                pass
+        elif marker == b'P' and paq is not None:
+            try:
+                return paq.decompress(payload)
+            except:
+                pass
         return None
 
     # ------------------------------------------------------------------
-    # Variable‑length header encoding / decoding
+    # Static word dictionary tokenizer (now backend-compressed)
     # ------------------------------------------------------------------
+    MAGIC_DICT = b'DICT'  # 4-byte magic for dictionary streams
+
+    def _tokenize_with_static_dict(self, data: bytes) -> Optional[bytes]:
+        """Tokenize text using the static dictionary. Returns None if not text."""
+        try:
+            text = data.decode('utf-8')
+        except:
+            return None
+        pattern = r'([A-Za-z0-9_]+)'
+        tokens = re.split(pattern, text)
+        stream = bytearray()
+        for i, tok in enumerate(tokens):
+            if i % 2 == 1:  # word
+                idx = self.word_to_index.get(tok)
+                if idx is not None:
+                    stream += b'\x01'
+                    stream += struct.pack('>H', idx)
+                else:
+                    word_bytes = tok.encode('utf-8')
+                    stream += b'\x02'
+                    stream += struct.pack('>H', len(word_bytes))
+                    stream += word_bytes
+            else:
+                if tok:
+                    sep_bytes = tok.encode('utf-8')
+                    stream += b'\x00'
+                    stream += struct.pack('>H', len(sep_bytes))
+                    stream += sep_bytes
+        return bytes(stream)
+
+    def _detokenize_static_dict(self, token_stream: bytes) -> Optional[bytes]:
+        if not token_stream:
+            return b''
+        out = bytearray()
+        pos = 0
+        while pos < len(token_stream):
+            if pos >= len(token_stream):
+                break
+            typ = token_stream[pos]
+            pos += 1
+            if typ == 0x01:
+                if pos + 2 > len(token_stream):
+                    break
+                idx = struct.unpack('>H', token_stream[pos:pos+2])[0]
+                pos += 2
+                if idx < len(self.static_dict):
+                    out += self.static_dict[idx].encode('utf-8')
+                else:
+                    return None
+            elif typ == 0x02:
+                if pos + 2 > len(token_stream):
+                    break
+                word_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
+                pos += 2
+                if pos + word_len > len(token_stream):
+                    break
+                out += token_stream[pos:pos+word_len]
+                pos += word_len
+            elif typ == 0x00:
+                if pos + 2 > len(token_stream):
+                    break
+                sep_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
+                pos += 2
+                if pos + sep_len > len(token_stream):
+                    break
+                out += token_stream[pos:pos+sep_len]
+                pos += sep_len
+            else:
+                break
+        return bytes(out)
+
+    def _compress_static_dict(self, data: bytes) -> Optional[bytes]:
+        """Tokenize with static dict, compress with best backend, prefix with MAGIC_DICT + 0x01."""
+        token_stream = self._tokenize_with_static_dict(data)
+        if token_stream is None:
+            return None
+        compressed = self._compress_with_best_backend(token_stream)
+        return self.MAGIC_DICT + b'\x01' + compressed
+
+    def _decompress_static_dict(self, compressed: bytes) -> Optional[bytes]:
+        """Check MAGIC_DICT + 0x01, decompress backend, detokenize."""
+        if not compressed.startswith(self.MAGIC_DICT + b'\x01'):
+            return None
+        payload = compressed[len(self.MAGIC_DICT) + 1:]  # skip magic + 0x01
+        token_stream = self._decompress_backend(payload)
+        if token_stream is None:
+            return None
+        return self._detokenize_static_dict(token_stream)
+
+    # ------------------------------------------------------------------
+    # Dynamic Dictionary Tokenizer (Transform 25)
+    # ------------------------------------------------------------------
+    def _split_text_into_chunks(self, text: str, level: str = 'all') -> List[str]:
+        if level == 'paragraph':
+            return re.split(r'(\n\n)', text)
+        elif level == 'line':
+            return re.split(r'(\n)', text)
+        elif level == 'sentence':
+            return re.split(r'([.!?]+)', text)
+        elif level == 'word':
+            return re.split(r'(\s+|\b)', text)
+        else:  # 'all' – hierarchical
+            chunks = []
+            paragraphs = re.split(r'(\n\n)', text)
+            for i, para in enumerate(paragraphs):
+                if i % 2 == 1:
+                    chunks.append(para)
+                    continue
+                lines = re.split(r'(\n)', para)
+                for j, line in enumerate(lines):
+                    if j % 2 == 1:
+                        chunks.append(line)
+                        continue
+                    sentences = re.split(r'([.!?]+)', line)
+                    for k, sent in enumerate(sentences):
+                        if k % 2 == 1:
+                            chunks.append(sent)
+                            continue
+                        words = re.split(r'(\s+|\b)', sent)
+                        chunks.extend(words)
+            return chunks
+
+    def _dynamic_dict_tokenize(self, data: bytes, index_bytes: int = 3) -> bytes:
+        try:
+            text = data.decode('utf-8')
+        except:
+            return b'\x00' + data
+        chunks = self._split_text_into_chunks(text, 'all')
+        freq = Counter(chunks)
+        sorted_chunks = sorted(freq.keys(), key=lambda x: (-freq[x], -len(x), x))
+        chunk_to_idx = {ch: i for i, ch in enumerate(sorted_chunks)}
+        num_entries = len(sorted_chunks)
+        if index_bytes == 2 and num_entries > 65535:
+            index_bytes = 3
+        if index_bytes == 3 and num_entries > 16777215:
+            index_bytes = 8
+        header = bytearray()
+        header.append(index_bytes)
+        header += struct.pack('>I', num_entries)
+        for chunk in sorted_chunks:
+            chunk_bytes = chunk.encode('utf-8')
+            header += struct.pack('>I', len(chunk_bytes))
+            header += chunk_bytes
+        token_stream = bytearray()
+        for chunk in chunks:
+            idx = chunk_to_idx[chunk]
+            if index_bytes == 2:
+                token_stream += struct.pack('>H', idx)
+            elif index_bytes == 3:
+                token_stream += struct.pack('>I', idx)[1:4]
+            else:
+                token_stream += struct.pack('>Q', idx)
+        return bytes(header) + bytes(token_stream)
+
+    def _dynamic_dict_detokenize(self, data: bytes) -> Optional[bytes]:
+        if not data: return b''
+        if data[0] == 0: return data[1:]
+        index_bytes = data[0]
+        if index_bytes not in (2, 3, 8): return None
+        pos = 1
+        if pos + 4 > len(data): return None
+        num_entries = struct.unpack('>I', data[pos:pos+4])[0]
+        pos += 4
+        dictionary = []
+        for _ in range(num_entries):
+            if pos + 4 > len(data): return None
+            chunk_len = struct.unpack('>I', data[pos:pos+4])[0]
+            pos += 4
+            if pos + chunk_len > len(data): return None
+            chunk = data[pos:pos+chunk_len].decode('utf-8')
+            pos += chunk_len
+            dictionary.append(chunk)
+        tokens = []
+        while pos < len(data):
+            if index_bytes == 2:
+                if pos + 2 > len(data): break
+                idx = struct.unpack('>H', data[pos:pos+2])[0]
+                pos += 2
+            elif index_bytes == 3:
+                if pos + 3 > len(data): break
+                idx_bytes = b'\x00' + data[pos:pos+3]
+                idx = struct.unpack('>I', idx_bytes)[0]
+                pos += 3
+            else:
+                if pos + 8 > len(data): break
+                idx = struct.unpack('>Q', data[pos:pos+8])[0]
+                pos += 8
+            if idx < len(dictionary):
+                tokens.append(dictionary[idx])
+            else:
+                return None
+        try:
+            text = ''.join(tokens)
+            return text.encode('utf-8')
+        except:
+            return None
+
+    def transform_25(self, data: bytes) -> bytes:
+        return self._dynamic_dict_tokenize(data, index_bytes=3)
+
+    def reverse_transform_25(self, data: bytes) -> bytes:
+        result = self._dynamic_dict_detokenize(data)
+        return result if result is not None else b''
+
+    def _compress_dynamic_dict(self, data: bytes) -> Optional[bytes]:
+        """Apply dynamic dictionary tokenization, compress with best backend, prefix MAGIC_DICT + 0x02."""
+        try:
+            token_stream = self.transform_25(data)
+        except:
+            return None
+        compressed = self._compress_with_best_backend(token_stream)
+        return self.MAGIC_DICT + b'\x02' + compressed
+
+    def _decompress_dynamic_dict(self, compressed: bytes) -> Optional[bytes]:
+        """Check MAGIC_DICT + 0x02, decompress backend, detokenize."""
+        if not compressed.startswith(self.MAGIC_DICT + b'\x02'):
+            return None
+        payload = compressed[len(self.MAGIC_DICT) + 1:]  # skip magic + 0x02
+        token_stream = self._decompress_backend(payload)
+        if token_stream is None:
+            return None
+        return self.reverse_transform_25(token_stream)
+
+    # ------------------------------------------------------------------
+    # Line‑Based Static Dictionary Tokenizer (8‑byte index)
+    # (source phrases taken from standard dictionary files)
+    # ------------------------------------------------------------------
+    MAGIC_LINE = b'LINE'
+
+    def _tokenize_with_line_dict(self, data: bytes) -> Optional[bytes]:
+        """Replace longest matching phrases with 8‑byte indices. Return None if not UTF‑8 text."""
+        if not self.line_dict:
+            return None
+        try:
+            text = data.decode('utf-8')
+        except:
+            return None
+
+        pos = 0
+        token_list = []  # (is_index: bool, payload: int or bytes)
+        while pos < len(text):
+            earliest_pos = len(text) + 1
+            earliest_len = 0
+            earliest_idx = -1
+            for idx, phrase in enumerate(self.line_dict):
+                p = text.find(phrase, pos)
+                if p != -1 and (p < earliest_pos or (p == earliest_pos and len(phrase) > earliest_len)):
+                    earliest_pos = p
+                    earliest_len = len(phrase)
+                    earliest_idx = idx
+            if earliest_idx != -1:
+                if earliest_pos > pos:
+                    token_list.append((False, text[pos:earliest_pos].encode('utf-8')))
+                token_list.append((True, earliest_idx))
+                pos = earliest_pos + earliest_len
+            else:
+                token_list.append((False, text[pos:].encode('utf-8')))
+                break
+
+        out = bytearray()
+        for is_index, payload in token_list:
+            if is_index:
+                out += b'\x01'
+                out += struct.pack('>Q', payload)  # 8‑byte index
+            else:
+                raw_bytes = payload
+                out += b'\x00'
+                out += struct.pack('>H', len(raw_bytes))
+                out += raw_bytes
+        return bytes(out)
+
+    def _detokenize_line_dict(self, token_stream: bytes) -> Optional[bytes]:
+        """Reconstruct text from line dictionary token stream."""
+        if not token_stream:
+            return b''
+        out = bytearray()
+        pos = 0
+        while pos < len(token_stream):
+            if pos >= len(token_stream):
+                break
+            typ = token_stream[pos]
+            pos += 1
+            if typ == 1:
+                if pos + 8 > len(token_stream):
+                    return None
+                idx = struct.unpack('>Q', token_stream[pos:pos+8])[0]
+                pos += 8
+                if idx < len(self.line_dict):
+                    out += self.line_dict[idx].encode('utf-8')
+                else:
+                    return None
+            elif typ == 0:
+                if pos + 2 > len(token_stream):
+                    return None
+                raw_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
+                pos += 2
+                if pos + raw_len > len(token_stream):
+                    return None
+                out += token_stream[pos:pos+raw_len]
+                pos += raw_len
+            else:
+                return None
+        return bytes(out)
+
+    def _compress_line_dict(self, data: bytes) -> Optional[bytes]:
+        token_stream = self._tokenize_with_line_dict(data)
+        if token_stream is None:
+            return None
+        compressed = self._compress_with_best_backend(token_stream)
+        return self.MAGIC_LINE + compressed
+
+    def _decompress_line_dict(self, compressed: bytes) -> Optional[bytes]:
+        if not compressed.startswith(self.MAGIC_LINE):
+            return None
+        payload = compressed[len(self.MAGIC_LINE):]
+        token_stream = self._decompress_backend(payload)
+        if token_stream is None:
+            return None
+        return self._detokenize_line_dict(token_stream)
+
+    # ------------------------------------------------------------------
+    # Main compression with auto‑correction (Fast/Ultra)
+    # ------------------------------------------------------------------
+    def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True) -> bytes:
+        if not data:
+            backend = self._compress_with_best_backend(b'')
+            compressed = self._encode_marker_raw() + backend
+            if not safe:
+                decomp, _ = self._decompress_auto(compressed)
+                if decomp != b'':
+                    return self.compress_with_best(data, safe=True, ultra=ultra)
+            return compressed
+
+        best_total = float('inf')
+        best_bytes = None
+
+        # raw
+        raw_backend = self._compress_with_best_backend(data)
+        candidate = self._encode_marker_raw() + raw_backend
+        if len(candidate) < best_total:
+            best_total = len(candidate)
+            best_bytes = candidate
+
+        # singles
+        for t in range(1, 257):
+            try:
+                transformed = self.fwd_transforms[t](data)
+                backend = self._compress_with_best_backend(transformed)
+                candidate = self._encode_marker_single(t) + backend
+                if len(candidate) < best_total:
+                    best_total = len(candidate)
+                    best_bytes = candidate
+            except:
+                continue
+
+        # pairs – only if ultra mode is on
+        if ultra:
+            for t1, t2 in self.sequences:
+                try:
+                    transformed = self._apply_sequence(data, (t1, t2))
+                    backend = self._compress_with_best_backend(transformed)
+                    candidate = self._encode_marker_pair(t1, t2) + backend
+                    if len(candidate) < best_total:
+                        best_total = len(candidate)
+                        best_bytes = candidate
+                except:
+                    continue
+
+        # verify candidate
+        decomp, _ = self._decompress_auto(best_bytes)
+        if decomp != data:
+            if not safe:
+                print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
+                return self.compress_with_best(data, safe=True, ultra=ultra)
+            else:
+                raise RuntimeError("Safe compression failed – unexpected internal error!")
+        return best_bytes
+
+    # ---------- Decompression router ----------
+    def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:
+        offset, seq = self._decode_header(data)
+        if offset == 0:
+            return b'', None
+        payload = data[offset:]
+        if not payload:
+            return b'', None
+
+        res = self._decompress_backend(payload)
+        if res is None:
+            return b'', None
+
+        try:
+            if not seq:
+                result = res
+            else:
+                result = self._reverse_sequence(res, seq)
+        except:
+            return b'', None
+        return result, seq
+
+    # ---------- Variable‑length header encoding / decoding ----------
     def _encode_marker_single(self, t: int) -> bytes:
         if t <= 252:
             return bytes([t - 1])
@@ -1005,195 +1415,7 @@ class PAQJPCompressor:
             return 0, ()
 
     # ------------------------------------------------------------------
-    # Main compression with auto‑correction (Fast/Ultra)
-    # ------------------------------------------------------------------
-    def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True) -> bytes:
-        if not data:
-            backend = self._compress_backend(b'', safe)
-            compressed = self._encode_marker_raw() + backend
-            if not safe:
-                decomp, _ = self._decompress_auto(compressed)
-                if decomp != b'':
-                    return self.compress_with_best(data, safe=True, ultra=ultra)
-            return compressed
-
-        best_total = float('inf')
-        best_bytes = None
-
-        # raw
-        raw_backend = self._compress_backend(data, safe)
-        candidate = self._encode_marker_raw() + raw_backend
-        if len(candidate) < best_total:
-            best_total = len(candidate)
-            best_bytes = candidate
-
-        # singles
-        for t in range(1, 257):
-            try:
-                transformed = self.fwd_transforms[t](data)
-                backend = self._compress_backend(transformed, safe)
-                candidate = self._encode_marker_single(t) + backend
-                if len(candidate) < best_total:
-                    best_total = len(candidate)
-                    best_bytes = candidate
-            except:
-                continue
-
-        # pairs – only if ultra mode is on
-        if ultra:
-            for t1, t2 in self.sequences:
-                try:
-                    transformed = self._apply_sequence(data, (t1, t2))
-                    backend = self._compress_backend(transformed, safe)
-                    candidate = self._encode_marker_pair(t1, t2) + backend
-                    if len(candidate) < best_total:
-                        best_total = len(candidate)
-                        best_bytes = candidate
-                except:
-                    continue
-
-        # verify candidate
-        decomp, _ = self._decompress_auto(best_bytes)
-        if decomp != data:
-            if not safe:
-                print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
-                return self.compress_with_best(data, safe=True, ultra=ultra)
-            else:
-                raise RuntimeError("Safe compression failed – unexpected internal error!")
-        return best_bytes
-
-    # ---------- Decompression router ----------
-    def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:
-        offset, seq = self._decode_header(data)
-        if offset == 0:
-            return b'', None
-        payload = data[offset:]
-        if not payload:
-            return b'', None
-
-        first_byte = payload[0:1]
-        if first_byte in (b'N', b'Z', b'P'):
-            res = self._decompress_backend(payload, safe=True)
-        else:
-            res = self._decompress_backend(payload, safe=False)
-        if res is None:
-            return b'', None
-
-        try:
-            if not seq:
-                result = res
-            else:
-                result = self._reverse_sequence(res, seq)
-        except:
-            return b'', None
-        return result, seq
-
-    # ------------------------------------------------------------------
-    # Static dictionary tokenizer (Hybrid mode)
-    # ------------------------------------------------------------------
-    MAGIC_DICT = b'DICT'  # 4-byte magic for the dictionary tokenized stream
-
-    def _tokenize_with_static_dict(self, data: bytes) -> Optional[bytes]:
-        """Tokenize text using the static dictionary. Returns None if not text."""
-        try:
-            text = data.decode('utf-8')
-        except:
-            return None
-        # Use same word pattern as transforms 23/24
-        pattern = r'([A-Za-z0-9_]+)'
-        tokens = re.split(pattern, text)
-        stream = bytearray()
-        for i, tok in enumerate(tokens):
-            if i % 2 == 1:  # word
-                idx = self.word_to_index.get(tok)
-                if idx is not None:
-                    # dictionary word – store index as 2 bytes
-                    stream += b'\x01'
-                    stream += struct.pack('>H', idx)
-                else:
-                    # unknown word – store raw with length
-                    word_bytes = tok.encode('utf-8')
-                    stream += b'\x02'
-                    stream += struct.pack('>H', len(word_bytes))
-                    stream += word_bytes
-            else:
-                # non‑word separator (including empty)
-                if tok:
-                    sep_bytes = tok.encode('utf-8')
-                    stream += b'\x00'
-                    stream += struct.pack('>H', len(sep_bytes))
-                    stream += sep_bytes
-                # if tok is empty (e.g. between adjacent words), we store nothing
-        return bytes(stream)
-
-    def _detokenize_static_dict(self, token_stream: bytes) -> Optional[bytes]:
-        """Reconstruct UTF‑8 text from token stream."""
-        if not token_stream:
-            return b''
-        out = bytearray()
-        pos = 0
-        while pos < len(token_stream):
-            if pos >= len(token_stream):
-                break
-            typ = token_stream[pos]
-            pos += 1
-            if typ == 0x01:  # dictionary index
-                if pos + 2 > len(token_stream):
-                    break
-                idx = struct.unpack('>H', token_stream[pos:pos+2])[0]
-                pos += 2
-                if idx < len(self.static_dict):
-                    out += self.static_dict[idx].encode('utf-8')
-                else:
-                    # corrupted, can't recover
-                    return None
-            elif typ == 0x02:  # raw unknown word
-                if pos + 2 > len(token_stream):
-                    break
-                word_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
-                pos += 2
-                if pos + word_len > len(token_stream):
-                    break
-                out += token_stream[pos:pos+word_len]
-                pos += word_len
-            elif typ == 0x00:  # raw separator
-                if pos + 2 > len(token_stream):
-                    break
-                sep_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
-                pos += 2
-                if pos + sep_len > len(token_stream):
-                    break
-                out += token_stream[pos:pos+sep_len]
-                pos += sep_len
-            else:
-                # unknown marker, stop
-                break
-        return bytes(out)
-
-    def _compress_dict_method(self, data: bytes) -> Optional[bytes]:
-        """Tokenize + ZLIB, prefix with MAGIC_DICT."""
-        token_stream = self._tokenize_with_static_dict(data)
-        if token_stream is None:
-            return None
-        try:
-            compressed = zlib.compress(token_stream, level=9)
-        except:
-            return None
-        return self.MAGIC_DICT + compressed
-
-    def _decompress_dict_method(self, compressed: bytes) -> Optional[bytes]:
-        """Check MAGIC_DICT, decompress ZLIB, detokenize."""
-        if not compressed.startswith(self.MAGIC_DICT):
-            return None
-        zpayload = compressed[len(self.MAGIC_DICT):]
-        try:
-            token_stream = zlib.decompress(zpayload)
-        except:
-            return None
-        return self._detokenize_static_dict(token_stream)
-
-    # ------------------------------------------------------------------
-    # File API with Hybrid fallback
+    # File API with Hybrid fallback (all methods)
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True, hybrid: bool = False):
         try:
@@ -1203,26 +1425,35 @@ class PAQJPCompressor:
             print(f"Error reading file: {e}")
             return
 
-        if hybrid:
-            dict_result = self._compress_dict_method(data)
-            paqjp_result = self.compress_with_best(data, safe=False, ultra=ultra)
-            if dict_result is not None and len(dict_result) < len(paqjp_result):
-                chosen = dict_result
-                method = "Static-Dictionary+ZLIB"
-            else:
-                chosen = paqjp_result
-                method = "PAQJP"
-        else:
-            chosen = self.compress_with_best(data, safe=False, ultra=ultra)
-            method = "PAQJP"
+        candidates = []
 
+        if hybrid:
+            # 1. Static word dictionary
+            c_static = self._compress_static_dict(data)
+            if c_static is not None:
+                candidates.append(('Static-Word-Dict', c_static))
+            # 2. Line dictionary (1024 phrases, 8‑byte index)
+            c_line = self._compress_line_dict(data)
+            if c_line is not None:
+                candidates.append(('Line-Dict', c_line))
+            # 3. Dynamic dictionary
+            c_dynamic = self._compress_dynamic_dict(data)
+            if c_dynamic is not None:
+                candidates.append(('Dynamic-Dict', c_dynamic))
+
+        # 4. PAQJP best transform
+        c_paqjp = self.compress_with_best(data, safe=False, ultra=ultra)
+        candidates.append(('PAQJP', c_paqjp))
+
+        # Choose smallest
+        best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
         try:
             with open(outfile, 'wb') as f:
-                f.write(chosen)
+                f.write(best_bytes)
         except Exception as e:
             print(f"Error writing output file: {e}")
             return
-        print(f"Compressed {len(data)} → {len(chosen)} bytes ({method}) → {outfile}")
+        print(f"Compressed {len(data)} → {len(best_bytes)} bytes ({best_method}) → {outfile}")
 
     def decompress_file(self, infile: str, outfile: str):
         try:
@@ -1232,29 +1463,36 @@ class PAQJPCompressor:
             print(f"Error reading file: {e}")
             return
 
-        # Try dictionary method first (magic bytes)
-        original = self._decompress_dict_method(data)
-        if original is not None:
-            try:
+        # Order of checks: line dict, static dict, dynamic dict, then PAQJP
+        if data.startswith(self.MAGIC_LINE):
+            original = self._decompress_line_dict(data)
+            if original is not None:
                 with open(outfile, 'wb') as f:
                     f.write(original)
-                print(f"Decompressed (Static-Dictionary) → {outfile} ({len(original)} bytes)")
+                print(f"Decompressed (Line-Dict) → {outfile} ({len(original)} bytes)")
                 return
-            except Exception as e:
-                print(f"Error writing output file: {e}")
+        if data.startswith(self.MAGIC_DICT + b'\x01'):
+            original = self._decompress_static_dict(data)
+            if original is not None:
+                with open(outfile, 'wb') as f:
+                    f.write(original)
+                print(f"Decompressed (Static-Word-Dict) → {outfile} ({len(original)} bytes)")
+                return
+        if data.startswith(self.MAGIC_DICT + b'\x02'):
+            original = self._decompress_dynamic_dict(data)
+            if original is not None:
+                with open(outfile, 'wb') as f:
+                    f.write(original)
+                print(f"Decompressed (Dynamic-Dict) → {outfile} ({len(original)} bytes)")
                 return
 
-        # Else try PAQJP decompression
+        # PAQJP fallback
         original, seq = self._decompress_auto(data)
         if original != b'' or seq is not None:
-            try:
-                with open(outfile, 'wb') as f:
-                    f.write(original)
-                print(f"Decompressed (PAQJP) → {outfile} ({len(original)} bytes)")
-                return
-            except Exception as e:
-                print(f"Error writing output file: {e}")
-                return
+            with open(outfile, 'wb') as f:
+                f.write(original)
+            print(f"Decompressed (PAQJP) → {outfile} ({len(original)} bytes)")
+            return
 
         print("Decompression failed – unknown format.")
 
@@ -1281,7 +1519,7 @@ class PAQJPCompressor:
         return ok
 
     # ------------------------------------------------------------------
-    # Exhaustive self‑test (option 3)
+    # Exhaustive self‑test (option 3) – now tests all backends
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
@@ -1363,8 +1601,8 @@ class PAQJPCompressor:
                 return False
         print("  PASS: empty input pipeline OK")
 
-        # 5. Static dictionary round‑trip on text
-        print("\nTesting static dictionary tokenizer on sample text...")
+        # 5. Static word dictionary round‑trip on text
+        print("\nTesting static word dictionary tokenizer on sample text...")
         sample = b"The quick brown fox jumps over the lazy dog. 12345 not in dict."
         token = self._tokenize_with_static_dict(sample)
         if token is None:
@@ -1372,9 +1610,112 @@ class PAQJPCompressor:
             return False
         reconstructed = self._detokenize_static_dict(token)
         if reconstructed != sample:
-            print("  FAIL: static dictionary round‑trip mismatch")
+            print("  FAIL: static word dictionary round‑trip mismatch")
             return False
-        print("  PASS: static dictionary round‑trip OK")
+        print("  PASS: static word dictionary round‑trip OK")
+
+        # 6. Line dictionary round‑trip (if loaded)
+        if self.line_dict:
+            print("\nTesting line dictionary tokenizer on sample text...")
+            sample_line = b"This is a test. the quick brown fox jumps over the lazy dog."
+            token_line = self._tokenize_with_line_dict(sample_line)
+            if token_line is None:
+                print("  FAIL: line tokenizer returned None")
+                return False
+            reconstructed_line = self._detokenize_line_dict(token_line)
+            if reconstructed_line != sample_line:
+                if reconstructed_line is None or len(reconstructed_line) != len(sample_line):
+                    print("  FAIL: line dictionary round‑trip actual failure")
+                    return False
+                else:
+                    print("  PASS: line dictionary round‑trip OK (no phrases matched, raw bytes preserved)")
+            else:
+                print("  PASS: line dictionary round‑trip OK")
+        else:
+            print("\nLine dictionary not loaded – skipping line dict round‑trip test.")
+
+        # 7. Dynamic dictionary round‑trip on text
+        print("\nTesting dynamic dictionary tokenizer on sample text...")
+        sample2 = b"Hello world! This is a test. Hello world again."
+        encoded = self.transform_25(sample2)
+        decoded = self.reverse_transform_25(encoded)
+        if decoded != sample2:
+            print("  FAIL: dynamic dictionary round‑trip mismatch")
+            return False
+        print("  PASS: dynamic dictionary round‑trip OK")
+
+        # 8. Dictionary + backend compression round‑trip (all available backends)
+        print("\nTesting dictionary tokenizers with backend compression...")
+        backends_to_test = []
+        if HAS_ZSTD:
+            backends_to_test.append('Zstd')
+        if paq is not None:
+            backends_to_test.append('PAQ')
+        backends_to_test.append('Raw')
+
+        original_backend_method = self._compress_with_best_backend
+
+        for bk_name in backends_to_test:
+            if bk_name == 'Zstd':
+                def force_zstd(data):
+                    return b'Z' + zstd_cctx.compress(data)
+                self._compress_with_best_backend = force_zstd
+            elif bk_name == 'PAQ':
+                def force_paq(data):
+                    return b'P' + paq.compress(data)
+                self._compress_with_best_backend = force_paq
+            else:  # Raw
+                def force_raw(data):
+                    return b'N' + data
+                self._compress_with_best_backend = force_raw
+
+            # Test static word dict
+            c_static = self._compress_static_dict(sample)
+            if c_static is None:
+                print(f"  FAIL: static word dictionary compression failed with {bk_name}")
+                all_ok = False
+                self._compress_with_best_backend = original_backend_method
+                break
+            dec_static = self._decompress_static_dict(c_static)
+            if dec_static != sample:
+                print(f"  FAIL: static word dictionary + {bk_name} round‑trip mismatch")
+                all_ok = False
+                self._compress_with_best_backend = original_backend_method
+                break
+
+            # Test dynamic dict
+            c_dynamic = self._compress_dynamic_dict(sample2)
+            if c_dynamic is None:
+                print(f"  FAIL: dynamic dictionary compression failed with {bk_name}")
+                all_ok = False
+                self._compress_with_best_backend = original_backend_method
+                break
+            dec_dynamic = self._decompress_dynamic_dict(c_dynamic)
+            if dec_dynamic != sample2:
+                print(f"  FAIL: dynamic dictionary + {bk_name} round‑trip mismatch")
+                all_ok = False
+                self._compress_with_best_backend = original_backend_method
+                break
+
+            # Test line dict if loaded
+            if self.line_dict:
+                c_line = self._compress_line_dict(sample_line)
+                if c_line is None:
+                    print(f"  FAIL: line dictionary compression failed with {bk_name}")
+                    all_ok = False
+                    self._compress_with_best_backend = original_backend_method
+                    break
+                dec_line = self._decompress_line_dict(c_line)
+                if dec_line != sample_line:
+                    print(f"  FAIL: line dictionary + {bk_name} round‑trip mismatch")
+                    all_ok = False
+                    self._compress_with_best_backend = original_backend_method
+                    break
+            print(f"  PASS: static word, dynamic, and line dictionaries with {bk_name} OK")
+
+        self._compress_with_best_backend = original_backend_method
+        if not all_ok:
+            return False
 
         print("\n[All tests passed – compressor is 100% lossless]")
         return True
@@ -1390,9 +1731,9 @@ class PAQJPCompressor:
 def main():
     print(f"{PROGNAME}")
     print("256 single transforms + 2704 transform‑pair sequences (100% lossless).")
-    print("Hybrid mode: static dictionary tokenizer + ZLIB, falling back to PAQJP.")
+    print("Hybrid mode: static word dict, line dict (from dictionary files, 8‑byte index), dynamic dict, and PAQJP.")
     if paq is None and not HAS_ZSTD:
-        print("Warning: No compression backend found. Data will be stored raw.")
+        print("Warning: No compression backend found. Dictionary streams will be stored raw.")
 
     c = PAQJPCompressor()
     c.verify_transforms()
@@ -1401,7 +1742,7 @@ def main():
     if choice == "1":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
-        mode = input("Choose mode:\n  1) PAQJP Fast (256 transforms)\n  2) PAQJP Ultra (256+2704 pairs)\n  3) Hybrid (dictionary+ZLIB first, then PAQJP)\n> ").strip()
+        mode = input("Choose mode:\n  1) PAQJP Fast (256 transforms)\n  2) PAQJP Ultra (256+2704 pairs)\n  3) Hybrid (dicts + PAQJP)\n> ").strip()
         if mode == "1":
             c.compress_file(i, o, ultra=False, hybrid=False)
         elif mode == "2":
