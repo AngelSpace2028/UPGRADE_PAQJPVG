@@ -7,7 +7,7 @@ PAQJP 9.0 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 ============================================================================
 
 Hybrid mode adds a pre‑compressor that uses the word lists from:
-    generated.txt, 1.txt, eng_news_2005_1M-*.txt, Dictionary.txt, etc.
+    generated.txt, eng_news_2005_1M-*.txt, Dictionary.txt, etc.
 The tokenizer replaces dictionary words with a 2‑byte index,
 unknown words are stored raw, and the whole token stream is ZLIB‑compressed.
 If this yields a smaller result than PAQJP’s best transform, it is used.
