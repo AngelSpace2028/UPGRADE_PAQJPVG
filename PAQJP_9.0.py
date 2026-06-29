@@ -43,7 +43,7 @@ PROGNAME = "PAQJP_9.0_LOSSLESS_HYBRID_DICT_AUTO"
 
 # ---------- Dictionary ZIP configuration ----------
 DICTIONARY_ZIP = "dictionaries.zip"
-DICTIONARY_ZIP_URL = "https://6d12ff49-574e-490c-a27e-ce0b42018552-00-2nsbwpijno5md.kirk.replit.dev"
+DICTIONARY_ZIP_URL = "https://drive.google.com/file/d/1Fi0yUBekv5J_eMrhPHcVL2iFcHqFvlyD/view?usp=drivesdk"
 
 # ---------- Line dictionary: take first 1024 lines from the dict files ----------
 MAX_LINE_ENTRIES = 1024
