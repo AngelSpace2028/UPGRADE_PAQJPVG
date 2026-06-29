@@ -8,9 +8,7 @@ All dictionary streams compressed with Zstd / ZLIB / PAQ (best chosen)
 Hybrid mode tries all methods and picks the smallest.
 (Auto‑correcting marker‑free default, safe fallback if needed)
 
---- AUTO‑DOWNLOAD FROM PROVIDED URL ---
-Downloads dictionaries.zip from the given link if not present.
-Uses ALL .txt files inside the ZIP (no hardcoded file list).
+--- AUTO‑DOWNLOAD FROM WORKING GOOGLE DRIVE LINKS ---
 """
 
 import math
@@ -41,11 +39,38 @@ except ImportError:
 
 PROGNAME = "PAQJP_9.0_LOSSLESS_HYBRID_DICT_AUTO"
 
-# ---------- Dictionary ZIP configuration ----------
-DICTIONARY_ZIP = "dictionaries.zip"
-DICTIONARY_ZIP_URL = "https://drive.google.com/file/d/1Fi0yUBekv5J_eMrhPHcVL2iFcHqFvlyD/view?usp=drivesdk"
+# ---------- Dictionary configuration – only working files ----------
+DICTIONARY_FILES = [
+    "generated.txt",
+    "eng_news_2005_1M-sentences.txt",
+    "eng_news_2005_1M-words.txt",
+    "eng_news_2005_1M-sources.txt",
+    "eng_news_2005_1M-co_n.txt",
+    "eng_news_2005_1M-co_s.txt",
+    "eng_news_2005_1M-inv_w_2.txt",
+    "eng_news_2005_1M-inv_w_3.txt",
+    "eng_news_2005_1M-inv_so.txt",
+    "eng_news_2005_1M-meta.txt",
+    "Dictionary.txt",
+    "the-complete-reference-html-css-fifth-edition.txt",
+]
 
-# ---------- Line dictionary: take first 1024 lines from the dict files ----------
+DICTIONARY_URLS = [
+    "https://drive.google.com/uc?export=download&id=1u_1dCEl8hhdEug6GwkOxHAuSx_6_Pme9",
+    "https://drive.google.com/uc?export=download&id=1pVqNN5JZ2AeOCgRaHkv4Vv6Byr4zK20e",
+    "https://drive.google.com/uc?export=download&id=1ZSC-Tn76x8itdN0rCp-Zw17hGudxbjxo",
+    "https://drive.google.com/uc?export=download&id=1VB_7tzngs4GxjclSRyRDnxgS8znT2w2S",
+    "https://drive.google.com/uc?export=download&id=1KVIRgiMrhCUCqQZJ3UT67ztls2GqGJzz",
+    "https://drive.google.com/uc?export=download&id=1Z3Lx6SqL4HWsnmbJCez4kXWRQQhUXWKL",
+    "https://drive.google.com/uc?export=download&id=1br2bdRMkZEVVRPKYmC4IIaZuAjxFJE4N",
+    "https://drive.google.com/uc?export=download&id=1aE6ubPZiJ8rr3lEVk8fFJYjDQ1y1rU0X",
+    "https://drive.google.com/uc?export=download&id=1uro3TZe-t5zPx2Qu2xrTL3lU8N0melk9",
+    "https://drive.google.com/uc?export=download&id=1HqsTH1DqpWNpGbn9VtD7-SB6wVqA90R2",
+    "https://drive.google.com/uc?export=download&id=1zZ8iMeBC3605NZhuc4UE9jx_w_lZFg5B",
+    "https://drive.google.com/uc?export=download&id=1dDdqYDgm7f-smS7KF70Wf0KmyFo-ft1M",
+]
+
+COMBINED_DICTIONARY_FILE = "dictionary_combined.txt"
 MAX_LINE_ENTRIES = 1024
 
 # ---------- Constants ----------
@@ -53,7 +78,6 @@ PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 
 PI_DIGITS = [79, 17, 111]
 BLOCK_SIZE = 1024
 
-# ---------- Helper: nearest prime ----------
 def find_nearest_prime_around(n: int) -> int:
     o = 0
     while True:
@@ -64,34 +88,71 @@ def find_nearest_prime_around(n: int) -> int:
             return c2
         o += 1
 
-# ---------- SHA‑256 truncated hash (transform 23) ----------
 def sha256_8bytes(data: bytes) -> bytes:
     return hashlib.sha256(data).digest()[:8]
 
-# ---------- XOR‑prime fallback hash (transform 24) ----------
 def xor_prime_hash(word: str) -> bytes:
     prime = 2147483647
     total = sum(ord(c) for c in word)
     transformed = total ^ prime
     return transformed.to_bytes(8, 'big')
 
-# ---------- Download dictionary ZIP if needed ----------
-def download_dictionary_zip():
-    if not os.path.exists(DICTIONARY_ZIP):
-        print(f"'{DICTIONARY_ZIP}' not found. Attempting to download from {DICTIONARY_ZIP_URL} ...")
+def download_and_merge_dictionaries():
+    if os.path.exists(COMBINED_DICTIONARY_FILE):
+        print(f"Combined dictionary '{COMBINED_DICTIONARY_FILE}' already exists. Skipping download.")
+        return True
+
+    all_words = set()
+    success_count = 0
+
+    for idx, (filename, url) in enumerate(zip(DICTIONARY_FILES, DICTIONARY_URLS)):
+        print(f"Downloading {filename} from {url} ...")
         try:
-            urllib.request.urlretrieve(DICTIONARY_ZIP_URL, DICTIONARY_ZIP)
-            print(f"Downloaded {DICTIONARY_ZIP} ({os.path.getsize(DICTIONARY_ZIP)} bytes)")
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response:
+                content = response.read()
+
+            if b'<html' in content[:200].lower():
+                print(f"  WARNING: {filename} appears to be an HTML page (not a text file). Skipping.")
+                continue
+
+            with open(filename, 'wb') as f:
+                f.write(content)
+
+            with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    w = line.strip()
+                    if w:
+                        all_words.add(w)
+
+            print(f"  Downloaded {filename} ({os.path.getsize(filename)} bytes)")
+            success_count += 1
+
         except Exception as e:
-            print(f"WARNING: Could not download dictionary ZIP: {e}")
-            print("Proceeding without static word and line dictionaries. Only dynamic dictionary and transforms will be used.")
-            # Do not raise – continue execution
+            print(f"  WARNING: Could not download {filename}: {e}")
+            if os.path.exists(filename):
+                os.remove(filename)
+
+    if success_count == 0:
+        print("ERROR: No dictionary files could be downloaded.")
+        print("Proceeding without static word and line dictionaries.")
+        return False
+
+    try:
+        with open(COMBINED_DICTIONARY_FILE, 'w', encoding='utf-8') as f:
+            for word in sorted(all_words):
+                f.write(word + '\n')
+        print(f"Merged {len(all_words)} unique words into {COMBINED_DICTIONARY_FILE} "
+              f"({os.path.getsize(COMBINED_DICTIONARY_FILE)} bytes)")
+        return True
+    except Exception as e:
+        print(f"ERROR: Could not write combined dictionary: {e}")
+        return False
 
 # ---------- Main Compressor Class ----------
 class PAQJPCompressor:
     def __init__(self):
-        # Ensure dictionaries are available (download if needed)
-        download_dictionary_zip()
+        download_and_merge_dictionaries()
 
         self.PI_DIGITS = PI_DIGITS.copy()
         self.seed_tables = self._gen_seed_tables(num=126, size=40, seed=42)
@@ -102,69 +163,61 @@ class PAQJPCompressor:
         self.sequences = self._build_pair_sequences()
         self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}
 
-        # Load static dictionaries
         self.static_dict, self.word_to_index = self._load_static_dictionary()
         self.line_dict, self.line_to_index = self._load_line_dictionary()
 
     # ------------------------------------------------------------------
-    # Static word dictionary loader – ZIP only, all .txt files
+    # Static word dictionary loader
     # ------------------------------------------------------------------
     def _load_static_dictionary(self):
-        if not os.path.exists(DICTIONARY_ZIP):
-            print(f"ERROR: {DICTIONARY_ZIP} not found. No dictionaries loaded.")
+        if not os.path.exists(COMBINED_DICTIONARY_FILE):
+            print(f"ERROR: {COMBINED_DICTIONARY_FILE} not found. No dictionaries loaded.")
             return [], {}
 
         words_set = set()
-        with zipfile.ZipFile(DICTIONARY_ZIP, 'r') as zf:
-            for name in zf.namelist():
-                # Use all .txt files inside the ZIP
-                if name.lower().endswith('.txt') and not name.endswith('/'):
-                    try:
-                        with zf.open(name) as f:
-                            for line in f:
-                                w = line.decode('utf-8', errors='ignore').strip()
-                                if w:
-                                    words_set.add(w)
-                    except Exception as e:
-                        print(f"Warning: could not read {name} from ZIP: {e}")
+        try:
+            with open(COMBINED_DICTIONARY_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    w = line.strip()
+                    if w:
+                        words_set.add(w)
+        except Exception as e:
+            print(f"Warning: could not read {COMBINED_DICTIONARY_FILE}: {e}")
+            return [], {}
 
         sorted_words = sorted(words_set)
         word_to_idx = {w: i for i, w in enumerate(sorted_words)}
-        print(f"Loaded static word dictionary: {len(sorted_words)} unique words (from ZIP).")
+        print(f"Loaded static word dictionary: {len(sorted_words)} unique words (from {COMBINED_DICTIONARY_FILE}).")
         return sorted_words, word_to_idx
 
     # ------------------------------------------------------------------
-    # Line dictionary – ZIP only, all .txt files
+    # Line dictionary
     # ------------------------------------------------------------------
     def _load_line_dictionary(self):
-        if not os.path.exists(DICTIONARY_ZIP):
-            print(f"ERROR: {DICTIONARY_ZIP} not found. Line dictionary disabled.")
+        if not os.path.exists(COMBINED_DICTIONARY_FILE):
+            print(f"ERROR: {COMBINED_DICTIONARY_FILE} not found. Line dictionary disabled.")
             return [], {}
 
         lines = []
-        with zipfile.ZipFile(DICTIONARY_ZIP, 'r') as zf:
-            for name in zf.namelist():
-                if name.lower().endswith('.txt') and not name.endswith('/'):
-                    try:
-                        with zf.open(name) as f:
-                            for raw_line in f:
-                                phrase = raw_line.decode('utf-8', errors='ignore').strip()
-                                if phrase and phrase not in lines:
-                                    lines.append(phrase)
-                                    if len(lines) >= MAX_LINE_ENTRIES:
-                                        break
+        try:
+            with open(COMBINED_DICTIONARY_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+                for raw_line in f:
+                    phrase = raw_line.strip()
+                    if phrase and phrase not in lines:
+                        lines.append(phrase)
                         if len(lines) >= MAX_LINE_ENTRIES:
                             break
-                    except Exception as e:
-                        print(f"Warning: could not read {name} from ZIP: {e}")
+        except Exception as e:
+            print(f"Warning: could not read {COMBINED_DICTIONARY_FILE}: {e}")
+            return [], {}
 
         if not lines:
-            print("Warning: No phrases found in ZIP. Line dictionary disabled.")
+            print("Warning: No phrases found. Line dictionary disabled.")
             return [], {}
 
         lines.sort(key=len, reverse=True)
         line_to_idx = {phrase: i for i, phrase in enumerate(lines)}
-        print(f"Loaded line dictionary: {len(lines)} phrases from ZIP.")
+        print(f"Loaded line dictionary: {len(lines)} phrases (first {MAX_LINE_ENTRIES} from {COMBINED_DICTIONARY_FILE}).")
         return lines, line_to_idx
 
     # ------------------------------------------------------------------
@@ -415,7 +468,7 @@ class PAQJPCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01‑21 (unchanged)
+    # Transforms 01‑21
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
@@ -672,7 +725,7 @@ class PAQJPCompressor:
         return bytes(t)
 
     # ------------------------------------------------------------------
-    # Transform 23 – SHA‑256 word tokenizer (lossless)
+    # Transform 23 – SHA‑256 word tokenizer
     # ------------------------------------------------------------------
     def transform_23(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
@@ -755,7 +808,7 @@ class PAQJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transform 24 – XOR‑prime word tokenizer (lossless)
+    # Transform 24 – XOR‑prime word tokenizer
     # ------------------------------------------------------------------
     def transform_24(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
@@ -946,7 +999,7 @@ class PAQJPCompressor:
         return result
 
     # ------------------------------------------------------------------
-    # Backend compression with automatic selection (safe markers)
+    # Backend compression with automatic selection
     # ------------------------------------------------------------------
     def _compress_with_best_backend(self, data: bytes) -> bytes:
         candidates = []
@@ -984,7 +1037,7 @@ class PAQJPCompressor:
         return None
 
     # ------------------------------------------------------------------
-    # Static word dictionary tokenizer
+    # Static word dictionary tokenizer – uses 'I' (4‑byte) for indices
     # ------------------------------------------------------------------
     MAGIC_DICT = b'DICT'
 
@@ -1001,7 +1054,7 @@ class PAQJPCompressor:
                 idx = self.word_to_index.get(tok)
                 if idx is not None:
                     stream += b'\x01'
-                    stream += struct.pack('>H', idx)
+                    stream += struct.pack('>I', idx)
                 else:
                     word_bytes = tok.encode('utf-8')
                     stream += b'\x02'
@@ -1026,10 +1079,10 @@ class PAQJPCompressor:
             typ = token_stream[pos]
             pos += 1
             if typ == 0x01:
-                if pos + 2 > len(token_stream):
+                if pos + 4 > len(token_stream):
                     break
-                idx = struct.unpack('>H', token_stream[pos:pos+2])[0]
-                pos += 2
+                idx = struct.unpack('>I', token_stream[pos:pos+4])[0]
+                pos += 4
                 if idx < len(self.static_dict):
                     out += self.static_dict[idx].encode('utf-8')
                 else:
