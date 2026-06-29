@@ -9,6 +9,7 @@ Hybrid mode tries all methods and picks the smallest.
 (Auto‑correcting marker‑free default, safe fallback if needed)
 
 --- AUTO‑DOWNLOAD FROM WORKING GOOGLE DRIVE LINKS ---
+All dictionary .txt files are stored in the 'Dictionaries/' folder.
 """
 
 import math
@@ -40,6 +41,9 @@ except ImportError:
 PROGNAME = "PAQJP_9.0_LOSSLESS_HYBRID_DICT_AUTO"
 
 # ---------- Dictionary configuration – only working files ----------
+DICT_DIR = "Dictionaries"
+COMBINED_DICTIONARY_FILE = os.path.join(DICT_DIR, "dictionary_combined.txt")
+
 DICTIONARY_FILES = [
     "generated.txt",
     "eng_news_2005_1M-sentences.txt",
@@ -70,7 +74,6 @@ DICTIONARY_URLS = [
     "https://drive.google.com/uc?export=download&id=1dDdqYDgm7f-smS7KF70Wf0KmyFo-ft1M",
 ]
 
-COMBINED_DICTIONARY_FILE = "dictionary_combined.txt"
 MAX_LINE_ENTRIES = 1024
 
 # ---------- Constants ----------
@@ -98,6 +101,12 @@ def xor_prime_hash(word: str) -> bytes:
     return transformed.to_bytes(8, 'big')
 
 def download_and_merge_dictionaries():
+    """Download all dictionary files into Dictionaries/ folder and merge them."""
+    # Create the directory if it doesn't exist
+    if not os.path.exists(DICT_DIR):
+        os.makedirs(DICT_DIR)
+
+    # Check if combined file already exists
     if os.path.exists(COMBINED_DICTIONARY_FILE):
         print(f"Combined dictionary '{COMBINED_DICTIONARY_FILE}' already exists. Skipping download.")
         return True
@@ -106,7 +115,8 @@ def download_and_merge_dictionaries():
     success_count = 0
 
     for idx, (filename, url) in enumerate(zip(DICTIONARY_FILES, DICTIONARY_URLS)):
-        print(f"Downloading {filename} from {url} ...")
+        local_path = os.path.join(DICT_DIR, filename)
+        print(f"Downloading {filename} to {DICT_DIR}/ ...")
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req) as response:
@@ -116,22 +126,23 @@ def download_and_merge_dictionaries():
                 print(f"  WARNING: {filename} appears to be an HTML page (not a text file). Skipping.")
                 continue
 
-            with open(filename, 'wb') as f:
+            with open(local_path, 'wb') as f:
                 f.write(content)
 
-            with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
+            # Read words from the downloaded file
+            with open(local_path, 'r', encoding='utf-8', errors='ignore') as f:
                 for line in f:
                     w = line.strip()
                     if w:
                         all_words.add(w)
 
-            print(f"  Downloaded {filename} ({os.path.getsize(filename)} bytes)")
+            print(f"  Downloaded {filename} ({os.path.getsize(local_path)} bytes)")
             success_count += 1
 
         except Exception as e:
             print(f"  WARNING: Could not download {filename}: {e}")
-            if os.path.exists(filename):
-                os.remove(filename)
+            if os.path.exists(local_path):
+                os.remove(local_path)
 
     if success_count == 0:
         print("ERROR: No dictionary files could be downloaded.")
@@ -167,7 +178,7 @@ class PAQJPCompressor:
         self.line_dict, self.line_to_index = self._load_line_dictionary()
 
     # ------------------------------------------------------------------
-    # Static word dictionary loader
+    # Static word dictionary loader – combined TXT file in Dictionaries/
     # ------------------------------------------------------------------
     def _load_static_dictionary(self):
         if not os.path.exists(COMBINED_DICTIONARY_FILE):
@@ -191,7 +202,7 @@ class PAQJPCompressor:
         return sorted_words, word_to_idx
 
     # ------------------------------------------------------------------
-    # Line dictionary
+    # Line dictionary – combined TXT file (first MAX_LINE_ENTRIES lines)
     # ------------------------------------------------------------------
     def _load_line_dictionary(self):
         if not os.path.exists(COMBINED_DICTIONARY_FILE):
@@ -468,7 +479,7 @@ class PAQJPCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01‑21
+    # Transforms 01‑21 (unchanged)
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
