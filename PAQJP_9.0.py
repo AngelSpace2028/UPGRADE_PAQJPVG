@@ -102,11 +102,9 @@ def xor_prime_hash(word: str) -> bytes:
 
 def download_and_merge_dictionaries():
     """Download all dictionary files into Dictionaries/ folder and merge them."""
-    # Create the directory if it doesn't exist
     if not os.path.exists(DICT_DIR):
         os.makedirs(DICT_DIR)
 
-    # Check if combined file already exists
     if os.path.exists(COMBINED_DICTIONARY_FILE):
         print(f"Combined dictionary '{COMBINED_DICTIONARY_FILE}' already exists. Skipping download.")
         return True
@@ -129,7 +127,6 @@ def download_and_merge_dictionaries():
             with open(local_path, 'wb') as f:
                 f.write(content)
 
-            # Read words from the downloaded file
             with open(local_path, 'r', encoding='utf-8', errors='ignore') as f:
                 for line in f:
                     w = line.strip()
