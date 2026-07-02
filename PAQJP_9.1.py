@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 9.0 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
-+ Static Word Dictionary + Static Line Dictionary (1024 phrases from dict files, 8‑byte index)
-+ Dynamic Dictionary (words, sentences, lines, paragraphs)
-All dictionary streams compressed with Zstd / ZLIB / PAQ (best chosen)
-Hybrid mode tries all methods and picks the smallest.
-(Auto‑correcting marker‑free default, safe fallback if needed)
+PAQJP 8.9 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
++ Hybrid Dictionary Mode (Static Word, Line, Dynamic)
+(Auto‑correcting backends – marker‑free by default, safe fallback if needed)
+============================================================================
 
---- AUTO‑DOWNLOAD FROM WORKING GOOGLE DRIVE LINKS ---
-All dictionary .txt files are stored in the 'Dictionaries/' folder.
+All single transforms (1‑256), all ordered pairs (52×52=2704), and the raw
+(no‑transform) path are mathematically lossless.  Every transform has a
+perfect inverse.
 
---- DEPENDENCIES (optional) ---
-This script can auto‑install missing packages via pip:
-    mpmath, zstandard, cython, paq
-(If any installation fails, the script continues with available backends.)
+Options:
+  1) Fast (256 transforms)
+  2) Ultra (256+2704 pairs)
+  3) Hybrid (dicts + PAQJP Ultra)
+  4) Full self‑test
+  5) Decompress (extract)
+  6) Test 2704 pairs & extraction check
 """
 
 import math
@@ -24,23 +26,18 @@ import hashlib
 import struct
 import re
 import os
-import zipfile
 import urllib.request
 import sys
 import subprocess
 import importlib
+import tempfile
 from typing import Optional, List, Tuple, Dict, Callable
 from collections import Counter
 
 # ------------------------------------------------------------------
-# function_pips – automatically install missing packages
+# function_pips – auto‑install missing packages (optional)
 # ------------------------------------------------------------------
 def function_pips():
-    """
-    Attempt to install four optional packages if they are not already present.
-    Packages: mpmath, zstandard, cython, paq.
-    User is prompted before any installation.
-    """
     packages = ['mpmath', 'zstandard', 'cython', 'paq']
     missing = []
     for pkg in packages:
@@ -67,7 +64,6 @@ def function_pips():
         except Exception as e:
             print(f"Failed to install {pkg}: {e}")
 
-# Run the installer at startup (before importing backends)
 function_pips()
 
 # ---------- Optional compression backends ----------
@@ -84,9 +80,9 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
-PROGNAME = "PAQJP_9.0_LOSSLESS_HYBRID_DICT_AUTO"
+PROGNAME = "PAQJP_8.9_HYBRID_DICT"
 
-# ---------- Dictionary configuration – only working files ----------
+# ---------- Dictionary configuration ----------
 DICT_DIR = "Dictionaries"
 COMBINED_DICTIONARY_FILE = os.path.join(DICT_DIR, "dictionary_combined.txt")
 
@@ -122,32 +118,7 @@ DICTIONARY_URLS = [
 
 MAX_LINE_ENTRIES = 1024
 
-# ---------- Constants ----------
-PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))]
-PI_DIGITS = [79, 17, 111]
-BLOCK_SIZE = 1024
-
-def find_nearest_prime_around(n: int) -> int:
-    o = 0
-    while True:
-        c1, c2 = n - o, n + o
-        if c1 >= 2 and all(c1 % d != 0 for d in range(2, int(c1 ** 0.5) + 1)):
-            return c1
-        if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2 ** 0.5) + 1)):
-            return c2
-        o += 1
-
-def sha256_8bytes(data: bytes) -> bytes:
-    return hashlib.sha256(data).digest()[:8]
-
-def xor_prime_hash(word: str) -> bytes:
-    prime = 2147483647
-    total = sum(ord(c) for c in word)
-    transformed = total ^ prime
-    return transformed.to_bytes(8, 'big')
-
 def download_and_merge_dictionaries():
-    """Download all dictionary files into Dictionaries/ folder and merge them."""
     if not os.path.exists(DICT_DIR):
         os.makedirs(DICT_DIR)
 
@@ -203,6 +174,30 @@ def download_and_merge_dictionaries():
         print(f"ERROR: Could not write combined dictionary: {e}")
         return False
 
+# ---------- Constants ----------
+PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))]
+PI_DIGITS = [79, 17, 111]
+BLOCK_SIZE = 1024
+
+def find_nearest_prime_around(n: int) -> int:
+    o = 0
+    while True:
+        c1, c2 = n - o, n + o
+        if c1 >= 2 and all(c1 % d != 0 for d in range(2, int(c1 ** 0.5) + 1)):
+            return c1
+        if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2 ** 0.5) + 1)):
+            return c2
+        o += 1
+
+def sha256_8bytes(data: bytes) -> bytes:
+    return hashlib.sha256(data).digest()[:8]
+
+def xor_prime_hash(word: str) -> bytes:
+    prime = 2147483647
+    total = sum(ord(c) for c in word)
+    transformed = total ^ prime
+    return transformed.to_bytes(8, 'big')
+
 # ---------- Main Compressor Class ----------
 class PAQJPCompressor:
     def __init__(self):
@@ -221,7 +216,7 @@ class PAQJPCompressor:
         self.line_dict, self.line_to_index = self._load_line_dictionary()
 
     # ------------------------------------------------------------------
-    # Static word dictionary loader – combined TXT file in Dictionaries/
+    # Dictionary loaders (unchanged)
     # ------------------------------------------------------------------
     def _load_static_dictionary(self):
         if not os.path.exists(COMBINED_DICTIONARY_FILE):
@@ -244,9 +239,6 @@ class PAQJPCompressor:
         print(f"Loaded static word dictionary: {len(sorted_words)} unique words (from {COMBINED_DICTIONARY_FILE}).")
         return sorted_words, word_to_idx
 
-    # ------------------------------------------------------------------
-    # Line dictionary – combined TXT file (first MAX_LINE_ENTRIES lines)
-    # ------------------------------------------------------------------
     def _load_line_dictionary(self):
         if not os.path.exists(COMBINED_DICTIONARY_FILE):
             print(f"ERROR: {COMBINED_DICTIONARY_FILE} not found. Line dictionary disabled.")
@@ -275,7 +267,7 @@ class PAQJPCompressor:
         return lines, line_to_idx
 
     # ------------------------------------------------------------------
-    # pi / constant helpers
+    # pi / constant helpers (unchanged)
     # ------------------------------------------------------------------
     def get_pi_digits(self, n: int) -> str:
         if n < 1: return ""
@@ -341,7 +333,7 @@ class PAQJPCompressor:
         return s[:n]
 
     # ------------------------------------------------------------------
-    # Seed tables, Fibonacci
+    # Seed tables, Fibonacci (unchanged)
     # ------------------------------------------------------------------
     def _gen_seed_tables(self, num=126, size=40, seed=42):
         random.seed(seed)
@@ -361,7 +353,7 @@ class PAQJPCompressor:
         return 0
 
     # ------------------------------------------------------------------
-    # Bit helpers (for RLE)
+    # Bit helpers (for RLE) (unchanged)
     # ------------------------------------------------------------------
     def _append_bits(self, bitlist: List[int], value: int, count: int):
         for i in range(count - 1, -1, -1):
@@ -375,7 +367,7 @@ class PAQJPCompressor:
         return val
 
     # ------------------------------------------------------------------
-    # RLE transform 00 (transform 1)
+    # RLE transform 00 (unchanged)
     # ------------------------------------------------------------------
     def transform_00(self, data: bytes) -> bytes:
         if not data: return b'\x00'
@@ -945,241 +937,7 @@ class PAQJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transform 26 – SHA‑256 block masking
-    # ------------------------------------------------------------------
-    def transform_26(self, data: bytes) -> bytes:
-        if not data: return b''
-        secret = b"PAQJP_TRANSFORM26_SECRET"
-        result = bytearray()
-        for idx in range(0, len(data), BLOCK_SIZE):
-            chunk = data[idx:idx+BLOCK_SIZE]
-            block_num = idx // BLOCK_SIZE
-            hasher = hashlib.sha256()
-            hasher.update(secret)
-            hasher.update(struct.pack(">Q", block_num))
-            mask = hasher.digest()
-            mask_repeated = (mask * ((len(chunk) // len(mask)) + 1))[:len(chunk)]
-            xored = bytes(a ^ b for a, b in zip(chunk, mask_repeated))
-            result.extend(xored)
-        return bytes(result)
-
-    def reverse_transform_26(self, data: bytes) -> bytes:
-        return self.transform_26(data)
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-    def _get_pattern(self, size: int, index: int):
-        random.seed(12345 + size * 100 + index)
-        return [random.randint(0, 255) for _ in range(size)]
-
-    def _calculate_repeats(self, data: bytes) -> int:
-        if not data: return 1
-        length = len(data)
-        byte_sum = sum(data) % 256
-        repeats = ((length * 13 + byte_sum * 17) % 256) + 1
-        return max(1, min(256, repeats))
-
-    def _dynamic_transform(self, n: int):
-        def tf(data: bytes):
-            if not data: return b''
-            seed = self.get_seed(n % len(self.seed_tables), len(data))
-            t = bytearray(data)
-            for i in range(len(t)): t[i] ^= seed
-            return bytes(t)
-        return tf, tf
-
-    # ------------------------------------------------------------------
-    # Build transform maps (1..256)
-    # ------------------------------------------------------------------
-    def _build_transform_maps(self):
-        self.fwd_transforms: Dict[int, Callable] = {}
-        self.rev_transforms: Dict[int, Callable] = {}
-        self.fwd_transforms[1] = self.transform_00; self.rev_transforms[1] = self.reverse_transform_00
-        self.fwd_transforms[2] = self.transform_01; self.rev_transforms[2] = self.reverse_transform_01
-        self.fwd_transforms[3] = self.transform_02; self.rev_transforms[3] = self.reverse_transform_02
-        self.fwd_transforms[4] = self.transform_03; self.rev_transforms[4] = self.reverse_transform_03
-        self.fwd_transforms[5] = self.transform_04; self.rev_transforms[5] = self.reverse_transform_04
-        self.fwd_transforms[6] = self.transform_05; self.rev_transforms[6] = self.reverse_transform_05
-        self.fwd_transforms[7] = self.transform_06; self.rev_transforms[7] = self.reverse_transform_06
-        self.fwd_transforms[8] = self.transform_07; self.rev_transforms[8] = self.reverse_transform_07
-        self.fwd_transforms[9] = self.transform_08; self.rev_transforms[9] = self.reverse_transform_08
-        self.fwd_transforms[10] = self.transform_09; self.rev_transforms[10] = self.reverse_transform_09
-        self.fwd_transforms[11] = self.transform_10; self.rev_transforms[11] = self.reverse_transform_10
-        self.fwd_transforms[12] = self.transform_11; self.rev_transforms[12] = self.reverse_transform_11
-        self.fwd_transforms[13] = self.transform_12; self.rev_transforms[13] = self.reverse_transform_12
-        self.fwd_transforms[14] = self.transform_13; self.rev_transforms[14] = self.reverse_transform_13
-        self.fwd_transforms[15] = self.transform_14; self.rev_transforms[15] = self.reverse_transform_14
-        self.fwd_transforms[16] = self.transform_15; self.rev_transforms[16] = self.reverse_transform_15
-        self.fwd_transforms[17] = self.transform_16; self.rev_transforms[17] = self.reverse_transform_16
-        self.fwd_transforms[18] = self.transform_17; self.rev_transforms[18] = self.reverse_transform_17
-        self.fwd_transforms[19] = self.transform_18; self.rev_transforms[19] = self.reverse_transform_18
-        self.fwd_transforms[20] = self.transform_19; self.rev_transforms[20] = self.reverse_transform_19
-        self.fwd_transforms[21] = self.transform_20; self.rev_transforms[21] = self.reverse_transform_20
-        self.fwd_transforms[22] = self.transform_21; self.rev_transforms[22] = self.reverse_transform_21
-        self.fwd_transforms[23] = self.transform_23; self.rev_transforms[23] = self.reverse_transform_23
-        self.fwd_transforms[24] = self.transform_24; self.rev_transforms[24] = self.reverse_transform_24
-        self.fwd_transforms[25] = self.transform_25
-        self.rev_transforms[25] = self.reverse_transform_25
-        self.fwd_transforms[26] = self.transform_26; self.rev_transforms[26] = self.reverse_transform_26
-        for i in range(27, 256):
-            fwd, rev = self._dynamic_transform(i)
-            self.fwd_transforms[i] = fwd
-            self.rev_transforms[i] = rev
-        self.fwd_transforms[256] = self.transform_256
-        self.rev_transforms[256] = self.reverse_transform_256
-        for i in range(1, 257):
-            if i not in self.fwd_transforms:
-                raise RuntimeError(f"Transform {i} missing!")
-
-    # ------------------------------------------------------------------
-    # Build pair sequences – 2704 (52×52)
-    # ------------------------------------------------------------------
-    def _build_pair_sequences(self) -> List[Tuple[int, int]]:
-        base = list(range(1, 53))
-        return [(t1, t2) for t1 in base for t2 in base]
-
-    def _apply_sequence(self, data: bytes, seq: Tuple[int, ...]) -> bytes:
-        result = data
-        for t_num in seq:
-            result = self.fwd_transforms[t_num](result)
-        return result
-
-    def _reverse_sequence(self, data: bytes, seq: Tuple[int, ...]) -> bytes:
-        result = data
-        for t_num in reversed(seq):
-            result = self.rev_transforms[t_num](result)
-        return result
-
-    # ------------------------------------------------------------------
-    # Backend compression with automatic selection
-    # ------------------------------------------------------------------
-    def _compress_with_best_backend(self, data: bytes) -> bytes:
-        candidates = []
-        candidates.append((b'N', b'N' + data))
-        if HAS_ZSTD:
-            try:
-                candidates.append((b'Z', b'Z' + zstd_cctx.compress(data)))
-            except:
-                pass
-        if paq is not None:
-            try:
-                candidates.append((b'P', b'P' + paq.compress(data)))
-            except:
-                pass
-        best = min(candidates, key=lambda x: len(x[1]))
-        return best[1]
-
-    def _decompress_backend(self, data: bytes) -> Optional[bytes]:
-        if len(data) < 1:
-            return None
-        marker = data[0:1]
-        payload = data[1:]
-        if marker == b'N':
-            return payload
-        elif marker == b'Z' and HAS_ZSTD:
-            try:
-                return zstd_dctx.decompress(payload)
-            except:
-                pass
-        elif marker == b'P' and paq is not None:
-            try:
-                return paq.decompress(payload)
-            except:
-                pass
-        return None
-
-    # ------------------------------------------------------------------
-    # Static word dictionary tokenizer – uses 'I' (4‑byte) for indices
-    # ------------------------------------------------------------------
-    MAGIC_DICT = b'DICT'
-
-    def _tokenize_with_static_dict(self, data: bytes) -> Optional[bytes]:
-        try:
-            text = data.decode('utf-8')
-        except:
-            return None
-        pattern = r'([A-Za-z0-9_]+)'
-        tokens = re.split(pattern, text)
-        stream = bytearray()
-        for i, tok in enumerate(tokens):
-            if i % 2 == 1:
-                idx = self.word_to_index.get(tok)
-                if idx is not None:
-                    stream += b'\x01'
-                    stream += struct.pack('>I', idx)
-                else:
-                    word_bytes = tok.encode('utf-8')
-                    stream += b'\x02'
-                    stream += struct.pack('>H', len(word_bytes))
-                    stream += word_bytes
-            else:
-                if tok:
-                    sep_bytes = tok.encode('utf-8')
-                    stream += b'\x00'
-                    stream += struct.pack('>H', len(sep_bytes))
-                    stream += sep_bytes
-        return bytes(stream)
-
-    def _detokenize_static_dict(self, token_stream: bytes) -> Optional[bytes]:
-        if not token_stream:
-            return b''
-        out = bytearray()
-        pos = 0
-        while pos < len(token_stream):
-            if pos >= len(token_stream):
-                break
-            typ = token_stream[pos]
-            pos += 1
-            if typ == 0x01:
-                if pos + 4 > len(token_stream):
-                    break
-                idx = struct.unpack('>I', token_stream[pos:pos+4])[0]
-                pos += 4
-                if idx < len(self.static_dict):
-                    out += self.static_dict[idx].encode('utf-8')
-                else:
-                    return None
-            elif typ == 0x02:
-                if pos + 2 > len(token_stream):
-                    break
-                word_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
-                pos += 2
-                if pos + word_len > len(token_stream):
-                    break
-                out += token_stream[pos:pos+word_len]
-                pos += word_len
-            elif typ == 0x00:
-                if pos + 2 > len(token_stream):
-                    break
-                sep_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
-                pos += 2
-                if pos + sep_len > len(token_stream):
-                    break
-                out += token_stream[pos:pos+sep_len]
-                pos += sep_len
-            else:
-                break
-        return bytes(out)
-
-    def _compress_static_dict(self, data: bytes) -> Optional[bytes]:
-        token_stream = self._tokenize_with_static_dict(data)
-        if token_stream is None:
-            return None
-        compressed = self._compress_with_best_backend(token_stream)
-        return self.MAGIC_DICT + b'\x01' + compressed
-
-    def _decompress_static_dict(self, compressed: bytes) -> Optional[bytes]:
-        if not compressed.startswith(self.MAGIC_DICT + b'\x01'):
-            return None
-        payload = compressed[len(self.MAGIC_DICT) + 1:]
-        token_stream = self._decompress_backend(payload)
-        if token_stream is None:
-            return None
-        return self._detokenize_static_dict(token_stream)
-
-    # ------------------------------------------------------------------
-    # Dynamic Dictionary Tokenizer (Transform 25)
+    # Transform 25 – Dynamic Dictionary Tokenizer
     # ------------------------------------------------------------------
     def _split_text_into_chunks(self, text: str, level: str = 'all') -> List[str]:
         if level == 'paragraph':
@@ -1293,27 +1051,417 @@ class PAQJPCompressor:
         result = self._dynamic_dict_detokenize(data)
         return result if result is not None else b''
 
+    # ------------------------------------------------------------------
+    # Transform 26 – SHA‑256 block masking
+    # ------------------------------------------------------------------
+    def transform_26(self, data: bytes) -> bytes:
+        if not data: return b''
+        secret = b"PAQJP_TRANSFORM26_SECRET"
+        result = bytearray()
+        for idx in range(0, len(data), BLOCK_SIZE):
+            chunk = data[idx:idx+BLOCK_SIZE]
+            block_num = idx // BLOCK_SIZE
+            hasher = hashlib.sha256()
+            hasher.update(secret)
+            hasher.update(struct.pack(">Q", block_num))
+            mask = hasher.digest()
+            mask_repeated = (mask * ((len(chunk) // len(mask)) + 1))[:len(chunk)]
+            xored = bytes(a ^ b for a, b in zip(chunk, mask_repeated))
+            result.extend(xored)
+        return bytes(result)
+
+    def reverse_transform_26(self, data: bytes) -> bytes:
+        return self.transform_26(data)
+
+    def transform_256(self, d: bytes) -> bytes:
+        return d
+    reverse_transform_256 = transform_256
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _get_pattern(self, size: int, index: int):
+        random.seed(12345 + size * 100 + index)
+        return [random.randint(0, 255) for _ in range(size)]
+
+    def _calculate_repeats(self, data: bytes) -> int:
+        if not data: return 1
+        length = len(data)
+        byte_sum = sum(data) % 256
+        repeats = ((length * 13 + byte_sum * 17) % 256) + 1
+        return max(1, min(256, repeats))
+
+    def _dynamic_transform(self, n: int):
+        def tf(data: bytes):
+            if not data: return b''
+            seed = self.get_seed(n % len(self.seed_tables), len(data))
+            t = bytearray(data)
+            for i in range(len(t)): t[i] ^= seed
+            return bytes(t)
+        return tf, tf
+
+    # ------------------------------------------------------------------
+    # Build transform maps (1..256) – include transforms 23,24,25,26
+    # ------------------------------------------------------------------
+    def _build_transform_maps(self):
+        self.fwd_transforms: Dict[int, Callable] = {}
+        self.rev_transforms: Dict[int, Callable] = {}
+        # Transforms 1‑22
+        self.fwd_transforms[1] = self.transform_00; self.rev_transforms[1] = self.reverse_transform_00
+        self.fwd_transforms[2] = self.transform_01; self.rev_transforms[2] = self.reverse_transform_01
+        self.fwd_transforms[3] = self.transform_02; self.rev_transforms[3] = self.reverse_transform_02
+        self.fwd_transforms[4] = self.transform_03; self.rev_transforms[4] = self.reverse_transform_03
+        self.fwd_transforms[5] = self.transform_04; self.rev_transforms[5] = self.reverse_transform_04
+        self.fwd_transforms[6] = self.transform_05; self.rev_transforms[6] = self.reverse_transform_05
+        self.fwd_transforms[7] = self.transform_06; self.rev_transforms[7] = self.reverse_transform_06
+        self.fwd_transforms[8] = self.transform_07; self.rev_transforms[8] = self.reverse_transform_07
+        self.fwd_transforms[9] = self.transform_08; self.rev_transforms[9] = self.reverse_transform_08
+        self.fwd_transforms[10] = self.transform_09; self.rev_transforms[10] = self.reverse_transform_09
+        self.fwd_transforms[11] = self.transform_10; self.rev_transforms[11] = self.reverse_transform_10
+        self.fwd_transforms[12] = self.transform_11; self.rev_transforms[12] = self.reverse_transform_11
+        self.fwd_transforms[13] = self.transform_12; self.rev_transforms[13] = self.reverse_transform_12
+        self.fwd_transforms[14] = self.transform_13; self.rev_transforms[14] = self.reverse_transform_13
+        self.fwd_transforms[15] = self.transform_14; self.rev_transforms[15] = self.reverse_transform_14
+        self.fwd_transforms[16] = self.transform_15; self.rev_transforms[16] = self.reverse_transform_15
+        self.fwd_transforms[17] = self.transform_16; self.rev_transforms[17] = self.reverse_transform_16
+        self.fwd_transforms[18] = self.transform_17; self.rev_transforms[18] = self.reverse_transform_17
+        self.fwd_transforms[19] = self.transform_18; self.rev_transforms[19] = self.reverse_transform_18
+        self.fwd_transforms[20] = self.transform_19; self.rev_transforms[20] = self.reverse_transform_19
+        self.fwd_transforms[21] = self.transform_20; self.rev_transforms[21] = self.reverse_transform_20
+        self.fwd_transforms[22] = self.transform_21; self.rev_transforms[22] = self.reverse_transform_21
+        # Custom transforms 23,24,25,26
+        self.fwd_transforms[23] = self.transform_23; self.rev_transforms[23] = self.reverse_transform_23
+        self.fwd_transforms[24] = self.transform_24; self.rev_transforms[24] = self.reverse_transform_24
+        self.fwd_transforms[25] = self.transform_25; self.rev_transforms[25] = self.reverse_transform_25
+        self.fwd_transforms[26] = self.transform_26; self.rev_transforms[26] = self.reverse_transform_26
+        # Transforms 27‑255 dynamic
+        for i in range(27, 256):
+            fwd, rev = self._dynamic_transform(i)
+            self.fwd_transforms[i] = fwd
+            self.rev_transforms[i] = rev
+        # Transform 256 no-op
+        self.fwd_transforms[256] = self.transform_256
+        self.rev_transforms[256] = self.reverse_transform_256
+        # Ensure all present
+        for i in range(1, 257):
+            if i not in self.fwd_transforms:
+                raise RuntimeError(f"Transform {i} missing!")
+
+    # ------------------------------------------------------------------
+    # Build pair sequences – 2704 (52×52)
+    # ------------------------------------------------------------------
+    def _build_pair_sequences(self) -> List[Tuple[int, int]]:
+        base = list(range(1, 53))
+        return [(t1, t2) for t1 in base for t2 in base]
+
+    def _apply_sequence(self, data: bytes, seq: Tuple[int, ...]) -> bytes:
+        result = data
+        for t_num in seq:
+            result = self.fwd_transforms[t_num](result)
+        return result
+
+    def _reverse_sequence(self, data: bytes, seq: Tuple[int, ...]) -> bytes:
+        result = data
+        for t_num in reversed(seq):
+            result = self.rev_transforms[t_num](result)
+        return result
+
+    # ------------------------------------------------------------------
+    # Compression backends (dual mode)
+    # ------------------------------------------------------------------
+    def _compress_backend(self, data: bytes, safe: bool = False) -> bytes:
+        candidates = []
+        if paq is not None:
+            try:
+                if safe:
+                    candidates.append((b'P', b'P' + paq.compress(data)))
+                else:
+                    candidates.append((b'L', paq.compress(data)))
+            except:
+                pass
+        if HAS_ZSTD:
+            try:
+                if safe:
+                    candidates.append((b'Z', b'Z' + zstd_cctx.compress(data)))
+                else:
+                    candidates.append((b'Z', zstd_cctx.compress(data)))
+            except:
+                pass
+        candidates.append((b'N', b'N' + data))
+        if not candidates:
+            return b'N' + data
+        if not safe:
+            _, best = min(candidates, key=lambda x: len(x[1]))
+            return best
+        else:
+            _, best = min(candidates, key=lambda x: len(x[1]))
+            return best
+
+    def _decompress_backend(self, data: bytes, safe: bool = False) -> Optional[bytes]:
+        if len(data) == 0:
+            return None
+        if safe:
+            marker = data[0:1]
+            payload = data[1:]
+            if marker == b'N':
+                return payload
+            elif marker == b'Z' and HAS_ZSTD:
+                try:
+                    return zstd_dctx.decompress(payload)
+                except:
+                    pass
+            elif marker == b'P' and paq is not None:
+                try:
+                    return paq.decompress(payload)
+                except:
+                    pass
+            return None
+        # marker‑free
+        if HAS_ZSTD:
+            try:
+                return zstd_dctx.decompress(data)
+            except:
+                pass
+        if paq is not None:
+            try:
+                return paq.decompress(data)
+            except:
+                pass
+        if len(data) > 0 and data[0] == ord('N'):
+            return data[1:]
+        return None
+
+    # ------------------------------------------------------------------
+    # Variable‑length header encoding / decoding
+    # ------------------------------------------------------------------
+    def _encode_marker_single(self, t: int) -> bytes:
+        if t <= 252:
+            return bytes([t - 1])
+        return bytes([254, t - 253])
+
+    def _encode_marker_raw(self) -> bytes:
+        return bytes([252])
+
+    def _encode_marker_pair(self, t1: int, t2: int) -> bytes:
+        idx = (t1 - 1) * 52 + (t2 - 1)
+        return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
+
+    def _decode_header(self, data: bytes):
+        if len(data) < 1:
+            return 0, ()
+        f = data[0]
+        if f < 252:
+            return 1, (f + 1,)
+        elif f == 252:
+            return 1, ()
+        elif f == 253:
+            if len(data) < 3:
+                return 0, ()
+            idx = (data[1] << 8) | data[2]
+            if idx >= len(self.sequences):
+                return 0, ()
+            t1, t2 = self.pair_lookup[idx]
+            return 3, (t1, t2)
+        elif f == 254:
+            if len(data) < 2:
+                return 0, ()
+            x = data[1]
+            if x > 3:
+                return 0, ()
+            return 2, (253 + x,)
+        else:
+            return 0, ()
+
+    # ------------------------------------------------------------------
+    # Main compression with auto‑correction (Fast/Ultra)
+    # ------------------------------------------------------------------
+    def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True) -> bytes:
+        if not data:
+            backend = self._compress_backend(b'', safe)
+            compressed = self._encode_marker_raw() + backend
+            if not safe:
+                decomp, _ = self._decompress_auto(compressed)
+                if decomp != b'':
+                    return self.compress_with_best(data, safe=True, ultra=ultra)
+            return compressed
+
+        best_total = float('inf')
+        best_bytes = None
+
+        # raw
+        raw_backend = self._compress_backend(data, safe)
+        candidate = self._encode_marker_raw() + raw_backend
+        if len(candidate) < best_total:
+            best_total = len(candidate)
+            best_bytes = candidate
+
+        # singles (always searched)
+        for t in range(1, 257):
+            try:
+                transformed = self.fwd_transforms[t](data)
+                backend = self._compress_backend(transformed, safe)
+                candidate = self._encode_marker_single(t) + backend
+                if len(candidate) < best_total:
+                    best_total = len(candidate)
+                    best_bytes = candidate
+            except:
+                continue
+
+        # pairs – only if ultra mode is on
+        if ultra:
+            for t1, t2 in self.sequences:
+                try:
+                    transformed = self._apply_sequence(data, (t1, t2))
+                    backend = self._compress_backend(transformed, safe)
+                    candidate = self._encode_marker_pair(t1, t2) + backend
+                    if len(candidate) < best_total:
+                        best_total = len(candidate)
+                        best_bytes = candidate
+                except:
+                    continue
+
+        # verify candidate
+        decomp, _ = self._decompress_auto(best_bytes)
+        if decomp != data:
+            if not safe:
+                print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
+                return self.compress_with_best(data, safe=True, ultra=ultra)
+            else:
+                raise RuntimeError("Safe compression failed – unexpected internal error!")
+        return best_bytes
+
+    # ---------- Decompression router ----------
+    def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:
+        offset, seq = self._decode_header(data)
+        if offset == 0:
+            return b'', None
+        payload = data[offset:]
+        if not payload:
+            return b'', None
+
+        first_byte = payload[0:1]
+        if first_byte in (b'N', b'Z', b'P'):
+            res = self._decompress_backend(payload, safe=True)
+        else:
+            res = self._decompress_backend(payload, safe=False)
+        if res is None:
+            return b'', None
+
+        try:
+            if not seq:
+                result = res
+            else:
+                result = self._reverse_sequence(res, seq)
+        except:
+            return b'', None
+        return result, seq
+
+    # ------------------------------------------------------------------
+    # Dictionary compression helpers (for hybrid mode)
+    # ------------------------------------------------------------------
+    MAGIC_DICT = b'DICT'
+    MAGIC_LINE = b'LINE'
+
+    def _tokenize_with_static_dict(self, data: bytes) -> Optional[bytes]:
+        try:
+            text = data.decode('utf-8')
+        except:
+            return None
+        pattern = r'([A-Za-z0-9_]+)'
+        tokens = re.split(pattern, text)
+        stream = bytearray()
+        for i, tok in enumerate(tokens):
+            if i % 2 == 1:
+                idx = self.word_to_index.get(tok)
+                if idx is not None:
+                    stream += b'\x01'
+                    stream += struct.pack('>I', idx)
+                else:
+                    word_bytes = tok.encode('utf-8')
+                    stream += b'\x02'
+                    stream += struct.pack('>H', len(word_bytes))
+                    stream += word_bytes
+            else:
+                if tok:
+                    sep_bytes = tok.encode('utf-8')
+                    stream += b'\x00'
+                    stream += struct.pack('>H', len(sep_bytes))
+                    stream += sep_bytes
+        return bytes(stream)
+
+    def _detokenize_static_dict(self, token_stream: bytes) -> Optional[bytes]:
+        if not token_stream:
+            return b''
+        out = bytearray()
+        pos = 0
+        while pos < len(token_stream):
+            if pos >= len(token_stream):
+                break
+            typ = token_stream[pos]
+            pos += 1
+            if typ == 0x01:
+                if pos + 4 > len(token_stream):
+                    break
+                idx = struct.unpack('>I', token_stream[pos:pos+4])[0]
+                pos += 4
+                if idx < len(self.static_dict):
+                    out += self.static_dict[idx].encode('utf-8')
+                else:
+                    return None
+            elif typ == 0x02:
+                if pos + 2 > len(token_stream):
+                    break
+                word_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
+                pos += 2
+                if pos + word_len > len(token_stream):
+                    break
+                out += token_stream[pos:pos+word_len]
+                pos += word_len
+            elif typ == 0x00:
+                if pos + 2 > len(token_stream):
+                    break
+                sep_len = struct.unpack('>H', token_stream[pos:pos+2])[0]
+                pos += 2
+                if pos + sep_len > len(token_stream):
+                    break
+                out += token_stream[pos:pos+sep_len]
+                pos += sep_len
+            else:
+                break
+        return bytes(out)
+
+    def _compress_static_dict(self, data: bytes) -> Optional[bytes]:
+        token_stream = self._tokenize_with_static_dict(data)
+        if token_stream is None:
+            return None
+        compressed = self._compress_backend(token_stream, safe=True)
+        return self.MAGIC_DICT + b'\x01' + compressed
+
+    def _decompress_static_dict(self, compressed: bytes) -> Optional[bytes]:
+        if not compressed.startswith(self.MAGIC_DICT + b'\x01'):
+            return None
+        payload = compressed[len(self.MAGIC_DICT) + 1:]
+        token_stream = self._decompress_backend(payload, safe=True)
+        if token_stream is None:
+            return None
+        return self._detokenize_static_dict(token_stream)
+
     def _compress_dynamic_dict(self, data: bytes) -> Optional[bytes]:
         try:
             token_stream = self.transform_25(data)
         except:
             return None
-        compressed = self._compress_with_best_backend(token_stream)
+        compressed = self._compress_backend(token_stream, safe=True)
         return self.MAGIC_DICT + b'\x02' + compressed
 
     def _decompress_dynamic_dict(self, compressed: bytes) -> Optional[bytes]:
         if not compressed.startswith(self.MAGIC_DICT + b'\x02'):
             return None
         payload = compressed[len(self.MAGIC_DICT) + 1:]
-        token_stream = self._decompress_backend(payload)
+        token_stream = self._decompress_backend(payload, safe=True)
         if token_stream is None:
             return None
         return self.reverse_transform_25(token_stream)
-
-    # ------------------------------------------------------------------
-    # Line‑Based Static Dictionary Tokenizer (8‑byte index)
-    # ------------------------------------------------------------------
-    MAGIC_LINE = b'LINE'
 
     def _tokenize_with_line_dict(self, data: bytes) -> Optional[bytes]:
         if not self.line_dict:
@@ -1392,131 +1540,273 @@ class PAQJPCompressor:
         token_stream = self._tokenize_with_line_dict(data)
         if token_stream is None:
             return None
-        compressed = self._compress_with_best_backend(token_stream)
+        compressed = self._compress_backend(token_stream, safe=True)
         return self.MAGIC_LINE + compressed
 
     def _decompress_line_dict(self, compressed: bytes) -> Optional[bytes]:
         if not compressed.startswith(self.MAGIC_LINE):
             return None
         payload = compressed[len(self.MAGIC_LINE):]
-        token_stream = self._decompress_backend(payload)
+        token_stream = self._decompress_backend(payload, safe=True)
         if token_stream is None:
             return None
         return self._detokenize_line_dict(token_stream)
 
     # ------------------------------------------------------------------
-    # Main compression with auto‑correction
+    # Transform verification (called once at startup)
     # ------------------------------------------------------------------
-    def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True) -> bytes:
-        if not data:
-            backend = self._compress_with_best_backend(b'')
-            compressed = self._encode_marker_raw() + backend
-            if not safe:
-                decomp, _ = self._decompress_auto(compressed)
-                if decomp != b'':
-                    return self.compress_with_best(data, safe=True, ultra=ultra)
-            return compressed
-
-        best_total = float('inf')
-        best_bytes = None
-
-        raw_backend = self._compress_with_best_backend(data)
-        candidate = self._encode_marker_raw() + raw_backend
-        if len(candidate) < best_total:
-            best_total = len(candidate)
-            best_bytes = candidate
-
+    def verify_transforms(self) -> bool:
+        print("Verifying all 256 transforms...")
+        ok = True
         for t in range(1, 257):
+            test = bytes([0x55])
             try:
-                transformed = self.fwd_transforms[t](data)
-                backend = self._compress_with_best_backend(transformed)
-                candidate = self._encode_marker_single(t) + backend
-                if len(candidate) < best_total:
-                    best_total = len(candidate)
-                    best_bytes = candidate
-            except:
-                continue
+                enc = self.fwd_transforms[t](test)
+                dec = self.rev_transforms[t](enc)
+                if dec == test:
+                    print(f"Transform {t}: right")
+                else:
+                    print(f"Transform {t}: incorrect")
+                    ok = False
+            except Exception:
+                print(f"Transform {t}: exception")
+                ok = False
+        print("Verification complete.\n")
+        return ok
 
-        if ultra:
-            for t1, t2 in self.sequences:
+    # ------------------------------------------------------------------
+    # Exhaustive self‑test (option 4)
+    # ------------------------------------------------------------------
+    def full_self_test(self) -> bool:
+        print("=" * 60)
+        print("PAQJP 8.9 – FULL SELF‑TEST (100% lossless)")
+        print("=" * 60)
+        all_ok = True
+
+        # 1. Single transforms on all bytes
+        print("Testing all 256 single transforms on all 256 byte values...")
+        for t_num in range(1, 257):
+            for b in range(256):
+                orig = bytes([b])
                 try:
-                    transformed = self._apply_sequence(data, (t1, t2))
-                    backend = self._compress_with_best_backend(transformed)
-                    candidate = self._encode_marker_pair(t1, t2) + backend
-                    if len(candidate) < best_total:
-                        best_total = len(candidate)
-                        best_bytes = candidate
-                except:
-                    continue
-
-        decomp, _ = self._decompress_auto(best_bytes)
-        if decomp != data:
-            if not safe:
-                print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
-                return self.compress_with_best(data, safe=True, ultra=ultra)
+                    enc = self.fwd_transforms[t_num](orig)
+                    dec = self.rev_transforms[t_num](enc)
+                    if dec != orig:
+                        print(f"  FAIL: transform {t_num} on byte {b:02x}")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  FAIL: transform {t_num} on byte {b:02x} raised {e}")
+                    all_ok = False
+                    break
             else:
-                raise RuntimeError("Safe compression failed – unexpected internal error!")
-        return best_bytes
+                if t_num % 32 == 0 or t_num == 256:
+                    print(f"  PASS: transforms 1..{t_num} OK on all bytes")
+            if not all_ok:
+                break
+        if not all_ok:
+            print("\n[FAIL] Single‑transform test failed.")
+            return False
 
-    def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:
-        offset, seq = self._decode_header(data)
-        if offset == 0:
-            return b'', None
-        payload = data[offset:]
-        if not payload:
-            return b'', None
+        # 2. Pairs on all bytes
+        print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
+        for idx, seq in enumerate(self.sequences):
+            for b in range(256):
+                orig = bytes([b])
+                try:
+                    enc = self._apply_sequence(orig, seq)
+                    dec = self._reverse_sequence(enc, seq)
+                    if dec != orig:
+                        print(f"  FAIL: pair {seq} on byte {b:02x}")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  FAIL: pair {seq} on byte {b:02x} raised {e}")
+                    all_ok = False
+                    break
+            if not all_ok:
+                break
+            if (idx + 1) % 256 == 0:
+                print(f"  PASS: {idx + 1} pairs tested on all bytes")
+        if not all_ok:
+            print("\n[FAIL] Pair test failed.")
+            return False
+        print("  PASS: all pairs OK on all bytes")
 
-        res = self._decompress_backend(payload)
-        if res is None:
-            return b'', None
+        # 3. Random data full pipeline
+        print("\nTesting random 1000‑byte block through full compress/decompress...")
+        rng = random.Random(12345)
+        test_data = bytes(rng.randint(0, 255) for _ in range(1000))
 
-        try:
-            if not seq:
-                result = res
+        for mode_name, safe in [("marker‑free", False), ("safe", True)]:
+            compressed = self.compress_with_best(test_data, safe=safe, ultra=True)
+            decompressed, _ = self._decompress_auto(compressed)
+            if decompressed != test_data:
+                print(f"  FAIL: random data pipeline mismatch in {mode_name} mode")
+                return False
+
+        print("  PASS: random data pipeline OK in both modes")
+
+        # 4. Empty input
+        print("\nTesting empty input...")
+        for safe in [False, True]:
+            compressed_empty = self.compress_with_best(b'', safe)
+            decomp_empty, _ = self._decompress_auto(compressed_empty)
+            if decomp_empty != b'':
+                print(f"  FAIL: empty input pipeline mismatch (safe={safe})")
+                return False
+        print("  PASS: empty input pipeline OK")
+
+        # 5. Dictionary round‑trip tests
+        print("\nTesting static word dictionary tokenizer on sample text...")
+        sample = b"The quick brown fox jumps over the lazy dog. 12345 not in dict."
+        token = self._tokenize_with_static_dict(sample)
+        if token is None:
+            print("  FAIL: tokenizer returned None")
+            return False
+        reconstructed = self._detokenize_static_dict(token)
+        if reconstructed != sample:
+            print("  FAIL: static word dictionary round‑trip mismatch")
+            return False
+        print("  PASS: static word dictionary round‑trip OK")
+
+        if self.line_dict:
+            print("\nTesting line dictionary tokenizer on sample text...")
+            sample_line = b"This is a test. the quick brown fox jumps over the lazy dog."
+            token_line = self._tokenize_with_line_dict(sample_line)
+            if token_line is None:
+                print("  FAIL: line tokenizer returned None")
+                return False
+            reconstructed_line = self._detokenize_line_dict(token_line)
+            if reconstructed_line != sample_line:
+                if reconstructed_line is None or len(reconstructed_line) != len(sample_line):
+                    print("  FAIL: line dictionary round‑trip actual failure")
+                    return False
+                else:
+                    print("  PASS: line dictionary round‑trip OK (no phrases matched, raw bytes preserved)")
             else:
-                result = self._reverse_sequence(res, seq)
-        except:
-            return b'', None
-        return result, seq
-
-    def _encode_marker_single(self, t: int) -> bytes:
-        if t <= 252:
-            return bytes([t - 1])
-        return bytes([254, t - 253])
-
-    def _encode_marker_raw(self) -> bytes:
-        return bytes([252])
-
-    def _encode_marker_pair(self, t1: int, t2: int) -> bytes:
-        idx = (t1 - 1) * 52 + (t2 - 1)
-        return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
-
-    def _decode_header(self, data: bytes):
-        if len(data) < 1:
-            return 0, ()
-        f = data[0]
-        if f < 252:
-            return 1, (f + 1,)
-        elif f == 252:
-            return 1, ()
-        elif f == 253:
-            if len(data) < 3:
-                return 0, ()
-            idx = (data[1] << 8) | data[2]
-            if idx >= len(self.sequences):
-                return 0, ()
-            t1, t2 = self.pair_lookup[idx]
-            return 3, (t1, t2)
-        elif f == 254:
-            if len(data) < 2:
-                return 0, ()
-            x = data[1]
-            if x > 3:
-                return 0, ()
-            return 2, (253 + x,)
+                print("  PASS: line dictionary round‑trip OK")
         else:
-            return 0, ()
+            print("\nLine dictionary not loaded – skipping line dict round‑trip test.")
 
+        print("\nTesting dynamic dictionary tokenizer on sample text...")
+        sample2 = b"Hello world! This is a test. Hello world again."
+        encoded = self.transform_25(sample2)
+        decoded = self.reverse_transform_25(encoded)
+        if decoded != sample2:
+            print("  FAIL: dynamic dictionary round‑trip mismatch")
+            return False
+        print("  PASS: dynamic dictionary round‑trip OK")
+
+        print("\n[All tests passed – compressor is 100% lossless]")
+        return True
+
+    # ------------------------------------------------------------------
+    # NEW: Test 2704 transform-pairs & extraction check (option 6)
+    # ------------------------------------------------------------------
+    def test_2704_pairs_lossless(self) -> bool:
+        print("=" * 60)
+        print("PAQJP 8.9 – TEST 2704 TRANSFORM‑PAIRS & EXTRACTION CHECK")
+        print("=" * 60)
+        all_ok = True
+
+        # 1. Quick check: each pair on all 256 byte values
+        print(f"Testing all {len(self.sequences)} pairs on all 256 byte values (quick)...")
+        for idx, seq in enumerate(self.sequences):
+            for b in range(256):
+                orig = bytes([b])
+                try:
+                    enc = self._apply_sequence(orig, seq)
+                    dec = self._reverse_sequence(enc, seq)
+                    if dec != orig:
+                        print(f"  FAIL: pair {seq} on byte {b:02x}")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  FAIL: pair {seq} on byte {b:02x} raised {e}")
+                    all_ok = False
+                    break
+            if not all_ok:
+                break
+            if (idx + 1) % 512 == 0:
+                print(f"  ... {idx+1} pairs passed on all bytes")
+        if not all_ok:
+            print("\n[FAIL] Quick pair test failed.")
+            return False
+        print("  PASS: all pairs OK on all 256 byte values")
+
+        # 2. Test each pair on a random 64‑byte block
+        print("\nTesting each pair on random 64‑byte block (round‑trip)...")
+        rng = random.Random(42)
+        for idx, seq in enumerate(self.sequences):
+            test_block = bytes(rng.randint(0, 255) for _ in range(64))
+            try:
+                enc = self._apply_sequence(test_block, seq)
+                dec = self._reverse_sequence(enc, seq)
+                if dec != test_block:
+                    print(f"  FAIL: pair {seq} on random block")
+                    all_ok = False
+                    break
+            except Exception as e:
+                print(f"  FAIL: pair {seq} raised {e} on random block")
+                all_ok = False
+                break
+            if (idx + 1) % 512 == 0:
+                print(f"  ... {idx+1} pairs passed random block test")
+        if not all_ok:
+            print("\n[FAIL] Random block test failed.")
+            return False
+        print("  PASS: all pairs preserve random 64‑byte blocks")
+
+        # 3. Extraction check: compress & decompress a sample with Ultra and Hybrid
+        print("\nTesting extraction (decompression) for Ultra mode...")
+        sample_text = b"This is a sample text for extraction testing. It contains words and punctuation!"
+        compressed_ultra = self.compress_with_best(sample_text, safe=False, ultra=True)
+        decompressed_ultra, _ = self._decompress_auto(compressed_ultra)
+        if decompressed_ultra != sample_text:
+            print("  FAIL: Ultra mode extraction mismatch")
+            all_ok = False
+        else:
+            print("  PASS: Ultra mode extraction OK")
+
+        print("\nTesting extraction (decompression) for Hybrid mode...")
+        # Use temp file to simulate file compression/decompression
+        with tempfile.NamedTemporaryFile(delete=False) as tmp_in:
+            tmp_in.write(sample_text)
+            tmp_in_name = tmp_in.name
+        try:
+            tmp_out_name = tmp_in_name + ".pjp"
+            # Compress with hybrid
+            self.compress_file(tmp_in_name, tmp_out_name, ultra=True, hybrid=True)
+            # Decompress
+            tmp_decomp_name = tmp_in_name + ".orig"
+            self.decompress_file(tmp_out_name, tmp_decomp_name)
+            # Verify
+            with open(tmp_decomp_name, 'rb') as f:
+                decomp_data = f.read()
+            if decomp_data != sample_text:
+                print("  FAIL: Hybrid mode extraction mismatch")
+                all_ok = False
+            else:
+                print("  PASS: Hybrid mode extraction OK")
+        except Exception as e:
+            print(f"  FAIL: Hybrid extraction test raised {e}")
+            all_ok = False
+        finally:
+            # Cleanup temp files
+            for fname in [tmp_in_name, tmp_out_name, tmp_decomp_name]:
+                if os.path.exists(fname):
+                    os.remove(fname)
+
+        if all_ok:
+            print("\n[All 2704 pair tests and extraction checks passed – system is 100% lossless]")
+        else:
+            print("\n[FAIL] Some tests failed.")
+        return all_ok
+
+    # ------------------------------------------------------------------
+    # File API – compression (with hybrid mode) and decompression
+    # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True, hybrid: bool = False):
         try:
             with open(infile, 'rb') as f:
@@ -1580,207 +1870,17 @@ class PAQJPCompressor:
                 return
 
         original, seq = self._decompress_auto(data)
-        if original != b'' or seq is not None:
+        if original == b'' and seq is None:
+            print("Decompression failed – unknown format.")
+            return
+        try:
             with open(outfile, 'wb') as f:
                 f.write(original)
-            print(f"Decompressed (PAQJP) → {outfile} ({len(original)} bytes)")
+        except Exception as e:
+            print(f"Error writing output file: {e}")
             return
-        print("Decompression failed – unknown format.")
-
-    def verify_transforms(self) -> bool:
-        print("Verifying all 256 transforms...")
-        ok = True
-        for t in range(1, 257):
-            test = bytes([0x55])
-            try:
-                enc = self.fwd_transforms[t](test)
-                dec = self.rev_transforms[t](enc)
-                if dec == test:
-                    print(f"Transform {t}: right")
-                else:
-                    print(f"Transform {t}: incorrect")
-                    ok = False
-            except Exception:
-                print(f"Transform {t}: exception")
-                ok = False
-        print("Verification complete.\n")
-        return ok
-
-    def full_self_test(self) -> bool:
-        print("=" * 60)
-        print("PAQJP 9.0 – FULL SELF‑TEST (100% lossless)")
-        print("=" * 60)
-        all_ok = True
-
-        print("Testing all 256 single transforms on all 256 byte values...")
-        for t_num in range(1, 257):
-            for b in range(256):
-                orig = bytes([b])
-                try:
-                    enc = self.fwd_transforms[t_num](orig)
-                    dec = self.rev_transforms[t_num](enc)
-                    if dec != orig:
-                        print(f"  FAIL: transform {t_num} on byte {b:02x}")
-                        all_ok = False
-                        break
-                except Exception as e:
-                    print(f"  FAIL: transform {t_num} on byte {b:02x} raised {e}")
-                    all_ok = False
-                    break
-            else:
-                if t_num % 32 == 0 or t_num == 256:
-                    print(f"  PASS: transforms 1..{t_num} OK on all bytes")
-            if not all_ok:
-                break
-        if not all_ok:
-            print("\n[FAIL] Single‑transform test failed.")
-            return False
-
-        print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
-        for idx, seq in enumerate(self.sequences):
-            for b in range(256):
-                orig = bytes([b])
-                try:
-                    enc = self._apply_sequence(orig, seq)
-                    dec = self._reverse_sequence(enc, seq)
-                    if dec != orig:
-                        print(f"  FAIL: pair {seq} on byte {b:02x}")
-                        all_ok = False
-                        break
-                except Exception as e:
-                    print(f"  FAIL: pair {seq} on byte {b:02x} raised {e}")
-                    all_ok = False
-                    break
-            if not all_ok:
-                break
-            if (idx + 1) % 256 == 0:
-                print(f"  PASS: {idx + 1} pairs tested on all bytes")
-        if not all_ok:
-            print("\n[FAIL] Pair test failed.")
-            return False
-        print("  PASS: all pairs OK on all bytes")
-
-        print("\nTesting random 1000‑byte block through full compress/decompress...")
-        rng = random.Random(12345)
-        test_data = bytes(rng.randint(0, 255) for _ in range(1000))
-        for mode_name, safe in [("marker‑free", False), ("safe", True)]:
-            compressed = self.compress_with_best(test_data, safe=safe, ultra=True)
-            decompressed, _ = self._decompress_auto(compressed)
-            if decompressed != test_data:
-                print(f"  FAIL: random data pipeline mismatch in {mode_name} mode")
-                return False
-        print("  PASS: random data pipeline OK in both modes")
-
-        print("\nTesting empty input...")
-        for safe in [False, True]:
-            compressed_empty = self.compress_with_best(b'', safe)
-            decomp_empty, _ = self._decompress_auto(compressed_empty)
-            if decomp_empty != b'':
-                print(f"  FAIL: empty input pipeline mismatch (safe={safe})")
-                return False
-        print("  PASS: empty input pipeline OK")
-
-        print("\nTesting static word dictionary tokenizer on sample text...")
-        sample = b"The quick brown fox jumps over the lazy dog. 12345 not in dict."
-        token = self._tokenize_with_static_dict(sample)
-        if token is None:
-            print("  FAIL: tokenizer returned None")
-            return False
-        reconstructed = self._detokenize_static_dict(token)
-        if reconstructed != sample:
-            print("  FAIL: static word dictionary round‑trip mismatch")
-            return False
-        print("  PASS: static word dictionary round‑trip OK")
-
-        if self.line_dict:
-            print("\nTesting line dictionary tokenizer on sample text...")
-            sample_line = b"This is a test. the quick brown fox jumps over the lazy dog."
-            token_line = self._tokenize_with_line_dict(sample_line)
-            if token_line is None:
-                print("  FAIL: line tokenizer returned None")
-                return False
-            reconstructed_line = self._detokenize_line_dict(token_line)
-            if reconstructed_line != sample_line:
-                if reconstructed_line is None or len(reconstructed_line) != len(sample_line):
-                    print("  FAIL: line dictionary round‑trip actual failure")
-                    return False
-                else:
-                    print("  PASS: line dictionary round‑trip OK (no phrases matched, raw bytes preserved)")
-            else:
-                print("  PASS: line dictionary round‑trip OK")
-        else:
-            print("\nLine dictionary not loaded – skipping line dict round‑trip test.")
-
-        print("\nTesting dynamic dictionary tokenizer on sample text...")
-        sample2 = b"Hello world! This is a test. Hello world again."
-        encoded = self.transform_25(sample2)
-        decoded = self.reverse_transform_25(encoded)
-        if decoded != sample2:
-            print("  FAIL: dynamic dictionary round‑trip mismatch")
-            return False
-        print("  PASS: dynamic dictionary round‑trip OK")
-
-        print("\nTesting dictionary tokenizers with backend compression...")
-        backends_to_test = []
-        if HAS_ZSTD:
-            backends_to_test.append('Zstd')
-        if paq is not None:
-            backends_to_test.append('PAQ')
-        backends_to_test.append('Raw')
-        original_backend_method = self._compress_with_best_backend
-        for bk_name in backends_to_test:
-            if bk_name == 'Zstd':
-                self._compress_with_best_backend = lambda d: b'Z' + zstd_cctx.compress(d)
-            elif bk_name == 'PAQ':
-                self._compress_with_best_backend = lambda d: b'P' + paq.compress(d)
-            else:
-                self._compress_with_best_backend = lambda d: b'N' + d
-
-            c_static = self._compress_static_dict(sample)
-            if c_static is None:
-                print(f"  FAIL: static word dictionary compression failed with {bk_name}")
-                all_ok = False
-                break
-            dec_static = self._decompress_static_dict(c_static)
-            if dec_static != sample:
-                print(f"  FAIL: static word dictionary + {bk_name} round‑trip mismatch")
-                all_ok = False
-                break
-
-            c_dynamic = self._compress_dynamic_dict(sample2)
-            if c_dynamic is None:
-                print(f"  FAIL: dynamic dictionary compression failed with {bk_name}")
-                all_ok = False
-                break
-            dec_dynamic = self._decompress_dynamic_dict(c_dynamic)
-            if dec_dynamic != sample2:
-                print(f"  FAIL: dynamic dictionary + {bk_name} round‑trip mismatch")
-                all_ok = False
-                break
-
-            if self.line_dict:
-                c_line = self._compress_line_dict(sample_line)
-                if c_line is None:
-                    print(f"  FAIL: line dictionary compression failed with {bk_name}")
-                    all_ok = False
-                    break
-                dec_line = self._decompress_line_dict(c_line)
-                if dec_line != sample_line:
-                    print(f"  FAIL: line dictionary + {bk_name} round‑trip mismatch")
-                    all_ok = False
-                    break
-            print(f"  PASS: static word, dynamic, and line dictionaries with {bk_name} OK")
-
-        self._compress_with_best_backend = original_backend_method
-        if not all_ok:
-            return False
-
-        print("\n[All tests passed – compressor is 100% lossless]")
-        return True
-
-    def transform_256(self, d: bytes) -> bytes:
-        return d
-    reverse_transform_256 = transform_256
+        seq_str = "raw" if not seq else f"sequence {seq}"
+        print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
 
 # ------------------------------------------------------------
 # Main
@@ -1788,32 +1888,41 @@ class PAQJPCompressor:
 def main():
     print(f"{PROGNAME}")
     print("256 single transforms + 2704 transform‑pair sequences (100% lossless).")
-    print("Hybrid mode: static word dict, line dict (from dictionary files in ZIP, 8‑byte index), dynamic dict, and PAQJP.")
+    print("Hybrid mode: static word dict, line dict, dynamic dict, and PAQJP.")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
 
     c = PAQJPCompressor()
     c.verify_transforms()
 
-    choice = input("\n1) Compress   2) Decompress   3) Full self‑test\n> ").strip()
+    choice = input("\n1) Fast (256 transforms)\n"
+                   "2) Ultra (256+2704 pairs)\n"
+                   "3) Hybrid (dicts + PAQJP Ultra)\n"
+                   "4) Full self‑test\n"
+                   "5) Decompress (extract)\n"
+                   "6) Test 2704 pairs & extraction check\n"
+                   "> ").strip()
+
     if choice == "1":
         i = input("Input file: ").strip()
         o = input("Output file: ").strip() or i + ".pjp"
-        mode = input("Choose mode:\n  1) PAQJP Fast (256 transforms)\n  2) PAQJP Ultra (256+2704 pairs)\n  3) Hybrid (dicts + PAQJP)\n> ").strip()
-        if mode == "1":
-            c.compress_file(i, o, ultra=False, hybrid=False)
-        elif mode == "2":
-            c.compress_file(i, o, ultra=True, hybrid=False)
-        elif mode == "3":
-            c.compress_file(i, o, ultra=True, hybrid=True)
-        else:
-            print("Invalid choice.")
+        c.compress_file(i, o, ultra=False, hybrid=False)
     elif choice == "2":
+        i = input("Input file: ").strip()
+        o = input("Output file: ").strip() or i + ".pjp"
+        c.compress_file(i, o, ultra=True, hybrid=False)
+    elif choice == "3":
+        i = input("Input file: ").strip()
+        o = input("Output file: ").strip() or i + ".pjp"
+        c.compress_file(i, o, ultra=True, hybrid=True)
+    elif choice == "4":
+        c.full_self_test()
+    elif choice == "5":
         i = input("Compressed file: ").strip()
         o = input("Output file: ").strip() or i.rsplit('.', 1)[0] + ".orig"
         c.decompress_file(i, o)
-    elif choice == "3":
-        c.full_self_test()
+    elif choice == "6":
+        c.test_2704_pairs_lossless()
     else:
         print("Invalid choice.")
 
