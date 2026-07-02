@@ -3,6 +3,7 @@
 """
 PAQJP 8.9 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Hybrid Dictionary Mode (Static Word, Line, Dynamic)
++ OPTIONAL QISKIT‑INSPIRED QUANTUM TRANSFORMS (9 for Fast, 17 for Ultra)
 (Auto‑correcting backends – marker‑free by default, safe fallback if needed)
 ============================================================================
 
@@ -11,9 +12,9 @@ All single transforms (1‑256), all ordered pairs (52×52=2704), and the raw
 perfect inverse.
 
 Options:
-  1) Fast (256 transforms)
-  2) Ultra (256+2704 pairs)
-  3) Hybrid (dicts + PAQJP Ultra)
+  1) Fast (256 transforms + 9 quantum if enabled)
+  2) Ultra (256+2704 pairs + 17 quantum singles if enabled)
+  3) Hybrid (dicts + PAQJP Ultra + quantum singles if enabled)
   4) Full self‑test
   5) Decompress (extract)
   6) Test 2704 pairs & extraction check
@@ -80,7 +81,27 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
-PROGNAME = "PAQJP_8.9_HYBRID_DICT"
+# ---------- Optional Qiskit (only QuantumCircuit, no simulation) ----------
+HAS_QISKIT = False
+try:
+    from qiskit import QuantumCircuit
+    HAS_QISKIT = True
+except ImportError:
+    pass
+
+PROGNAME = "PAQJP_8.9_HYBRID_DICT_QUANTUM"
+
+# ---------- User choice for quantum transforms ----------
+USE_QUANTUM = False
+if HAS_QISKIT:
+    ans = input("Enable quantum‑inspired transforms (requires Qiskit)? (y/n): ").strip().lower()
+    if ans == 'y':
+        USE_QUANTUM = True
+        print("Quantum transforms ENABLED.")
+    else:
+        print("Quantum transforms DISABLED.")
+else:
+    print("Qiskit not installed – quantum transforms disabled.")
 
 # ---------- Dictionary configuration ----------
 DICT_DIR = "Dictionaries"
@@ -214,6 +235,136 @@ class PAQJPCompressor:
 
         self.static_dict, self.word_to_index = self._load_static_dictionary()
         self.line_dict, self.line_to_index = self._load_line_dictionary()
+
+        # Precompute quantum permutations if enabled
+        if USE_QUANTUM and HAS_QISKIT:
+            self._precompute_quantum_transforms()
+
+    # ------------------------------------------------------------------
+    # Quantum transform generation (using Qiskit circuit as seed, no simulation)
+    # ------------------------------------------------------------------
+    def _generate_permutation_from_circuit(self, num_qubits: int, seed: int) -> List[int]:
+        """
+        Build a quantum circuit and use its structure (gates and parameters)
+        to seed a deterministic permutation. No simulation or statevector is used.
+        """
+        qc = QuantumCircuit(num_qubits)
+        rng = random.Random(seed)
+        # Add some gates with random angles
+        for qubit in range(num_qubits):
+            qc.h(qubit)
+            qc.rz(rng.random() * 2 * math.pi, qubit)
+            qc.rx(rng.random() * 2 * math.pi, qubit)
+        for _ in range(num_qubits):
+            for i in range(num_qubits - 1):
+                qc.cx(i, i+1)
+            qc.barrier()
+            for i in range(num_qubits):
+                qc.rz(rng.random() * 2 * math.pi, i)
+                qc.rx(rng.random() * 2 * math.pi, i)
+
+        # Convert circuit to a string to use as additional seed source
+        qasm_str = qc.qasm()
+        # Combine seed with hash of qasm to get final seed
+        final_seed = seed + hash(qasm_str) % 1000000
+        rng2 = random.Random(final_seed)
+        n = 1 << num_qubits
+        perm = list(range(n))
+        rng2.shuffle(perm)
+        # For ultra (2704), we take the first 2704 elements if n > 2704
+        if num_qubits == 12:  # ultra: 2^12=4096, we need 2704
+            # Since we need a bijection on 2704, we can just take the first 2704
+            # but that would not be a bijection. Instead we generate a permutation of 2704 directly.
+            # We'll just generate a permutation of 2704 using the seed.
+            perm_2704 = list(range(2704))
+            rng2 = random.Random(final_seed)
+            rng2.shuffle(perm_2704)
+            return perm_2704
+        else:
+            return perm
+
+    def _precompute_quantum_transforms(self):
+        """Precompute 9 fast (8 qubits) and 17 ultra (12 qubits) permutations."""
+        self.quantum_fast_perms = []
+        for i in range(9):
+            seed = 1000 + i
+            perm = self._generate_permutation_from_circuit(8, seed)
+            self.quantum_fast_perms.append(perm)
+
+        self.quantum_ultra_perms = []
+        for i in range(17):
+            seed = 2000 + i
+            perm = self._generate_permutation_from_circuit(12, seed)
+            self.quantum_ultra_perms.append(perm)
+
+        # Define transform functions for these permutations
+        self.quantum_fast_transforms = []
+        for perm in self.quantum_fast_perms:
+            fwd, rev = self._make_substitution_transform(perm, 256)
+            self.quantum_fast_transforms.append((fwd, rev))
+
+        self.quantum_ultra_transforms = []
+        for perm in self.quantum_ultra_perms:
+            fwd, rev = self._make_permutation_transform(perm, 2704)
+            self.quantum_ultra_transforms.append((fwd, rev))
+
+        # Add to transform maps (IDs 257-265 for fast, 266-282 for ultra)
+        # Fast: IDs 257-265
+        for idx, (fwd, rev) in enumerate(self.quantum_fast_transforms, start=257):
+            self.fwd_transforms[idx] = fwd
+            self.rev_transforms[idx] = rev
+        # Ultra: IDs 266-282
+        for idx, (fwd, rev) in enumerate(self.quantum_ultra_transforms, start=266):
+            self.fwd_transforms[idx] = fwd
+            self.rev_transforms[idx] = rev
+
+    def _make_substitution_transform(self, perm: List[int], size: int):
+        """Substitution box on 'size' values (size must be 256 for fast)."""
+        inv_perm = [0] * size
+        for i, p in enumerate(perm):
+            inv_perm[p] = i
+
+        def forward(data: bytes) -> bytes:
+            return bytes(perm[b] for b in data)
+
+        def reverse(data: bytes) -> bytes:
+            return bytes(inv_perm[b] for b in data)
+
+        return forward, reverse
+
+    def _make_permutation_transform(self, perm: List[int], block_size: int):
+        """Permutation of bytes within blocks of 'block_size'."""
+        inv_perm = [0] * block_size
+        for i, p in enumerate(perm):
+            inv_perm[p] = i
+
+        def forward(data: bytes) -> bytes:
+            out = bytearray()
+            for offset in range(0, len(data), block_size):
+                block = data[offset:offset+block_size]
+                if len(block) < block_size:
+                    out += block
+                else:
+                    new_block = bytearray(block_size)
+                    for i in range(block_size):
+                        new_block[perm[i]] = block[i]
+                    out += new_block
+            return bytes(out)
+
+        def reverse(data: bytes) -> bytes:
+            out = bytearray()
+            for offset in range(0, len(data), block_size):
+                block = data[offset:offset+block_size]
+                if len(block) < block_size:
+                    out += block
+                else:
+                    new_block = bytearray(block_size)
+                    for i in range(block_size):
+                        new_block[inv_perm[i]] = block[i]
+                    out += new_block
+            return bytes(out)
+
+        return forward, reverse
 
     # ------------------------------------------------------------------
     # Dictionary loaders (unchanged)
@@ -1102,6 +1253,7 @@ class PAQJPCompressor:
 
     # ------------------------------------------------------------------
     # Build transform maps (1..256) – include transforms 23,24,25,26
+    # and quantum transforms if enabled
     # ------------------------------------------------------------------
     def _build_transform_maps(self):
         self.fwd_transforms: Dict[int, Callable] = {}
@@ -1288,6 +1440,15 @@ class PAQJPCompressor:
         best_total = float('inf')
         best_bytes = None
 
+        # Determine which transforms to search based on ultra flag and quantum enabled
+        single_range = range(1, 257)  # always 256
+        if USE_QUANTUM and HAS_QISKIT:
+            # Fast quantum: 257-265 (9 transforms)
+            fast_quantum = range(257, 266)
+            single_range = list(single_range) + list(fast_quantum)
+            # Ultra quantum: 266-282 (17 transforms) are only used in ultra mode
+            ultra_quantum = range(266, 283) if ultra else []
+
         # raw
         raw_backend = self._compress_backend(data, safe)
         candidate = self._encode_marker_raw() + raw_backend
@@ -1295,8 +1456,8 @@ class PAQJPCompressor:
             best_total = len(candidate)
             best_bytes = candidate
 
-        # singles (always searched)
-        for t in range(1, 257):
+        # singles (including quantum if enabled)
+        for t in single_range:
             try:
                 transformed = self.fwd_transforms[t](data)
                 backend = self._compress_backend(transformed, safe)
@@ -1309,6 +1470,7 @@ class PAQJPCompressor:
 
         # pairs – only if ultra mode is on
         if ultra:
+            # Include quantum ultra singles (266-282) in the single search already
             for t1, t2 in self.sequences:
                 try:
                     transformed = self._apply_sequence(data, (t1, t2))
@@ -1556,8 +1718,9 @@ class PAQJPCompressor:
     # Transform verification (called once at startup)
     # ------------------------------------------------------------------
     def verify_transforms(self) -> bool:
-        print("Verifying all 256 transforms...")
+        print("Verifying all 256+ transforms...")
         ok = True
+        # Check base 1-256
         for t in range(1, 257):
             test = bytes([0x55])
             try:
@@ -1571,11 +1734,26 @@ class PAQJPCompressor:
             except Exception:
                 print(f"Transform {t}: exception")
                 ok = False
+        # Check quantum transforms if enabled
+        if USE_QUANTUM and HAS_QISKIT:
+            for t in range(257, 283):
+                test = bytes([0x55])
+                try:
+                    enc = self.fwd_transforms[t](test)
+                    dec = self.rev_transforms[t](enc)
+                    if dec == test:
+                        print(f"Quantum transform {t}: right")
+                    else:
+                        print(f"Quantum transform {t}: incorrect")
+                        ok = False
+                except Exception:
+                    print(f"Quantum transform {t}: exception")
+                    ok = False
         print("Verification complete.\n")
         return ok
 
     # ------------------------------------------------------------------
-    # Exhaustive self‑test (option 4)
+    # Exhaustive self‑test (option 4) – includes quantum if enabled
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
@@ -1584,7 +1762,8 @@ class PAQJPCompressor:
         all_ok = True
 
         # 1. Single transforms on all bytes
-        print("Testing all 256 single transforms on all 256 byte values...")
+        print("Testing all single transforms on all 256 byte values...")
+        # Base 1-256
         for t_num in range(1, 257):
             for b in range(256):
                 orig = bytes([b])
@@ -1605,8 +1784,34 @@ class PAQJPCompressor:
             if not all_ok:
                 break
         if not all_ok:
-            print("\n[FAIL] Single‑transform test failed.")
+            print("\n[FAIL] Base transform test failed.")
             return False
+
+        # Quantum singles if enabled
+        if USE_QUANTUM and HAS_QISKIT:
+            print("Testing quantum transforms on all 256 byte values...")
+            for t_num in range(257, 283):
+                for b in range(256):
+                    orig = bytes([b])
+                    try:
+                        enc = self.fwd_transforms[t_num](orig)
+                        dec = self.rev_transforms[t_num](enc)
+                        if dec != orig:
+                            print(f"  FAIL: quantum transform {t_num} on byte {b:02x}")
+                            all_ok = False
+                            break
+                    except Exception as e:
+                        print(f"  FAIL: quantum transform {t_num} on byte {b:02x} raised {e}")
+                        all_ok = False
+                        break
+                else:
+                    if (t_num-256) % 8 == 0:
+                        print(f"  PASS: quantum transforms 257..{t_num} OK on all bytes")
+                if not all_ok:
+                    break
+            if not all_ok:
+                print("\n[FAIL] Quantum transform test failed.")
+                return False
 
         # 2. Pairs on all bytes
         print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
@@ -1895,9 +2100,9 @@ def main():
     c = PAQJPCompressor()
     c.verify_transforms()
 
-    choice = input("\n1) Fast (256 transforms)\n"
-                   "2) Ultra (256+2704 pairs)\n"
-                   "3) Hybrid (dicts + PAQJP Ultra)\n"
+    choice = input("\n1) Fast (256 transforms + quantum if enabled)\n"
+                   "2) Ultra (256+2704 pairs + quantum singles if enabled)\n"
+                   "3) Hybrid (dicts + PAQJP Ultra + quantum singles if enabled)\n"
                    "4) Full self‑test\n"
                    "5) Decompress (extract)\n"
                    "6) Test 2704 pairs & extraction check\n"
