@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PAQJP 8.9 – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
+Program – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Hybrid Dictionary Mode (Static Word, Line, Dynamic)
 + OPTIONAL QISKIT‑INSPIRED QUANTUM TRANSFORMS (9 for Fast, 17 for Ultra)
 (Auto‑correcting backends – marker‑free by default, safe fallback if needed)
@@ -36,36 +36,58 @@ from typing import Optional, List, Tuple, Dict, Callable
 from collections import Counter
 
 # ------------------------------------------------------------------
-# function_pips – auto‑install missing packages (optional)
+# Helper: install a single package via pip (silent, auto)
 # ------------------------------------------------------------------
-def function_pips():
-    packages = ['mpmath', 'zstandard', 'cython', 'paq']
-    missing = []
-    for pkg in packages:
+def install_package(pkg: str) -> bool:
+    print(f"Installing {pkg}...")
+    try:
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
+        print(f"Successfully installed {pkg}")
+        return True
+    except Exception as e:
+        print(f"Failed to install {pkg}: {e}")
+        return False
+
+# ------------------------------------------------------------------
+# 1. Ask about quantum transforms – auto‑install if missing
+# ------------------------------------------------------------------
+USE_QUANTUM = False
+HAS_QISKIT = False
+
+quantum_choice = input("Enable quantum‑inspired transforms (requires Qiskit)? (y/n): ").strip().lower()
+if quantum_choice == 'y':
+    try:
+        from qiskit import QuantumCircuit
+        HAS_QISKIT = True
+        USE_QUANTUM = True
+        print("Quantum transforms ENABLED (Qiskit already installed).")
+    except ImportError:
+        print("Qiskit not found. Installing automatically...")
+        if install_package('qiskit'):
+            try:
+                from qiskit import QuantumCircuit
+                HAS_QISKIT = True
+                USE_QUANTUM = True
+                print("Quantum transforms ENABLED after automatic installation.")
+            except ImportError:
+                print("Qiskit installation succeeded but import failed – quantum transforms disabled.")
+        else:
+            print("Automatic installation failed – quantum transforms disabled.")
+else:
+    print("Quantum transforms disabled.")
+
+# ------------------------------------------------------------------
+# 2. Ask about other optional compression backends (zstandard, paq, etc.)
+# ------------------------------------------------------------------
+other_choice = input("Install other optional compression backends (zstandard, paq, mpmath, cython)? (y/n): ").strip().lower()
+if other_choice == 'y':
+    for pkg in ['mpmath', 'zstandard', 'cython', 'paq']:
         try:
             importlib.import_module(pkg)
         except ImportError:
-            missing.append(pkg)
-
-    if not missing:
-        print("All optional packages are already installed.")
-        return
-
-    print(f"The following optional packages are missing: {', '.join(missing)}")
-    answer = input("Do you want to install them now? (y/n): ").strip().lower()
-    if answer != 'y':
-        print("Skipping installation. The script will run with available backends.")
-        return
-
-    for pkg in missing:
-        print(f"Installing {pkg}...")
-        try:
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
-            print(f"Successfully installed {pkg}")
-        except Exception as e:
-            print(f"Failed to install {pkg}: {e}")
-
-function_pips()
+            install_package(pkg)
+else:
+    print("Skipping other backends.")
 
 # ---------- Optional compression backends ----------
 try:
@@ -81,27 +103,16 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
-# ---------- Optional Qiskit (only QuantumCircuit, no simulation) ----------
-HAS_QISKIT = False
-try:
-    from qiskit import QuantumCircuit
-    HAS_QISKIT = True
-except ImportError:
-    pass
+# ---------- (Re‑import Qiskit if it was just installed) ----------
+if USE_QUANTUM and not HAS_QISKIT:
+    try:
+        from qiskit import QuantumCircuit
+        HAS_QISKIT = True
+    except ImportError:
+        USE_QUANTUM = False
+        print("Quantum transforms disabled because Qiskit could not be imported.")
 
-PROGNAME = "PAQJP_8.9_HYBRID_DICT_QUANTUM"
-
-# ---------- User choice for quantum transforms ----------
-USE_QUANTUM = False
-if HAS_QISKIT:
-    ans = input("Enable quantum‑inspired transforms (requires Qiskit)? (y/n): ").strip().lower()
-    if ans == 'y':
-        USE_QUANTUM = True
-        print("Quantum transforms ENABLED.")
-    else:
-        print("Quantum transforms DISABLED.")
-else:
-    print("Qiskit not installed – quantum transforms disabled.")
+PROGNAME = "Program"
 
 # ---------- Dictionary configuration ----------
 DICT_DIR = "Dictionaries"
@@ -1757,7 +1768,7 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
-        print("PAQJP 8.9 – FULL SELF‑TEST (100% lossless)")
+        print("Program – FULL SELF‑TEST (100% lossless)")
         print("=" * 60)
         all_ok = True
 
@@ -1911,7 +1922,7 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     def test_2704_pairs_lossless(self) -> bool:
         print("=" * 60)
-        print("PAQJP 8.9 – TEST 2704 TRANSFORM‑PAIRS & EXTRACTION CHECK")
+        print("Program – TEST 2704 TRANSFORM‑PAIRS & EXTRACTION CHECK")
         print("=" * 60)
         all_ok = True
 
@@ -2033,7 +2044,7 @@ class PAQJPCompressor:
                 candidates.append(('Dynamic-Dict', c_dynamic))
 
         c_paqjp = self.compress_with_best(data, safe=False, ultra=ultra)
-        candidates.append(('PAQJP', c_paqjp))
+        candidates.append(('Program', c_paqjp))
 
         best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
         try:
@@ -2093,7 +2104,7 @@ class PAQJPCompressor:
 def main():
     print(f"{PROGNAME}")
     print("256 single transforms + 2704 transform‑pair sequences (100% lossless).")
-    print("Hybrid mode: static word dict, line dict, dynamic dict, and PAQJP.")
+    print("Hybrid mode: static word dict, line dict, dynamic dict, and Program.")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
 
@@ -2102,7 +2113,7 @@ def main():
 
     choice = input("\n1) Fast (256 transforms + quantum if enabled)\n"
                    "2) Ultra (256+2704 pairs + quantum singles if enabled)\n"
-                   "3) Hybrid (dicts + PAQJP Ultra + quantum singles if enabled)\n"
+                   "3) Hybrid (dicts + Program Ultra + quantum singles if enabled)\n"
                    "4) Full self‑test\n"
                    "5) Decompress (extract)\n"
                    "6) Test 2704 pairs & extraction check\n"
