@@ -1208,7 +1208,7 @@ class PJPCompressor:
         return result if result is not None else b''
 
     # ------------------------------------------------------------------
-    # Transform 26 – SHA‑256 block masking (bijective, can be included, but we exclude to be safe)
+    # Transform 26 – SHA‑256 block masking (bijective, but we exclude to be safe)
     # ------------------------------------------------------------------
     def transform_26(self, data: bytes) -> bytes:
         if not data: return b''
