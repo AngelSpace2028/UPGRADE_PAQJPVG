@@ -3,21 +3,11 @@
 """
 PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Hybrid Dictionary Mode (Static Word, Line, Dynamic)
-+ OPTIONAL QUANTUM‑INSPIRED TRANSFORMS (9 for Fast, 17 for Ultra)
-(No Qiskit / no qasm – purely deterministic pseudo‑random permutations)
++ OPTIONAL QISKIT‑INSPIRED QUANTUM TRANSFORMS (9 for Fast, 17 for Ultra)
++ Base64 Transform (22) and Base64‑aware dictionary loading
++ 6‑bit Text Compression Transform (27) – 64‑char alphabet
+(Auto‑correcting backends – marker‑free by default, safe fallback if needed)
 ============================================================================
-
-All single transforms (1‑256), all ordered pairs (52×52=2704), and the raw
-(no‑transform) path are mathematically lossless.  Every transform has a
-perfect inverse.
-
-Options:
-  1) Fast (256 transforms + 9 quantum if enabled)
-  2) Ultra (256+2704 pairs + 17 quantum singles if enabled)
-  3) Hybrid (dicts + PJP Ultra + quantum singles if enabled)
-  4) Full self‑test
-  5) Decompress (extract)
-  6) Test 2704 pairs & extraction check
 """
 
 import math
@@ -32,6 +22,7 @@ import sys
 import subprocess
 import importlib
 import tempfile
+import base64
 from typing import Optional, List, Tuple, Dict, Callable
 from collections import Counter
 
@@ -49,13 +40,30 @@ def install_package(pkg: str) -> bool:
         return False
 
 # ------------------------------------------------------------------
-# 1. Ask about quantum transforms – no Qiskit needed
+# 1. Ask about quantum transforms – auto‑install if missing
 # ------------------------------------------------------------------
 USE_QUANTUM = False
-quantum_choice = input("Enable quantum‑inspired transforms (pseudo‑random permutations)? (y/n): ").strip().lower()
+HAS_QISKIT = False
+
+quantum_choice = input("Enable quantum‑inspired transforms (requires Qiskit)? (y/n): ").strip().lower()
 if quantum_choice == 'y':
-    USE_QUANTUM = True
-    print("Quantum transforms ENABLED (using deterministic pseudo‑random permutations).")
+    try:
+        from qiskit import QuantumCircuit
+        HAS_QISKIT = True
+        USE_QUANTUM = True
+        print("Quantum transforms ENABLED (Qiskit already installed).")
+    except ImportError:
+        print("Qiskit not found. Installing automatically...")
+        if install_package('qiskit'):
+            try:
+                from qiskit import QuantumCircuit
+                HAS_QISKIT = True
+                USE_QUANTUM = True
+                print("Quantum transforms ENABLED after automatic installation.")
+            except ImportError:
+                print("Qiskit installation succeeded but import failed – quantum transforms disabled.")
+        else:
+            print("Automatic installation failed – quantum transforms disabled.")
 else:
     print("Quantum transforms disabled.")
 
@@ -85,6 +93,15 @@ try:
     HAS_ZSTD = True
 except ImportError:
     HAS_ZSTD = False
+
+# ---------- (Re‑import Qiskit if it was just installed) ----------
+if USE_QUANTUM and not HAS_QISKIT:
+    try:
+        from qiskit import QuantumCircuit
+        HAS_QISKIT = True
+    except ImportError:
+        USE_QUANTUM = False
+        print("Quantum transforms disabled because Qiskit could not be imported.")
 
 PROGNAME = "PJP"
 
@@ -150,10 +167,19 @@ def download_and_merge_dictionaries():
             with open(local_path, 'wb') as f:
                 f.write(content)
 
+            # Read lines, try base64 decode each line
             with open(local_path, 'r', encoding='utf-8', errors='ignore') as f:
                 for line in f:
                     w = line.strip()
-                    if w:
+                    if not w:
+                        continue
+                    # Try base64 decode; if valid and decodes to UTF‑8, use decoded string
+                    try:
+                        decoded = base64.b64decode(w, validate=True)
+                        decoded_str = decoded.decode('utf-8')
+                        all_words.add(decoded_str)
+                    except Exception:
+                        # Not valid base64 or not UTF‑8, use as‑is
                         all_words.add(w)
 
             print(f"  Downloaded {filename} ({os.path.getsize(local_path)} bytes)")
@@ -204,8 +230,19 @@ def xor_prime_hash(word: str) -> bytes:
     transformed = total ^ prime
     return transformed.to_bytes(8, 'big')
 
+# ---------- 6‑bit alphabet for transform 27 (exactly 64 chars) ----------
+ALPHABET_6BIT = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"    # 26
+    "abcdefghijklmnopqrstuvwxyz"    # 26
+    "0123456789"                    # 10
+    " \n"                           # 2  (space and newline)
+)  # Total = 64
+assert len(ALPHABET_6BIT) == 64
+CHAR_TO_6BIT = {ch: i for i, ch in enumerate(ALPHABET_6BIT)}
+SIXBIT_TO_CHAR = {i: ch for ch, i in CHAR_TO_6BIT.items()}
+
 # ---------- Main Compressor Class ----------
-class PAQJPCompressor:
+class PJPCompressor:
     def __init__(self):
         download_and_merge_dictionaries()
 
@@ -222,35 +259,58 @@ class PAQJPCompressor:
         self.line_dict, self.line_to_index = self._load_line_dictionary()
 
         # Precompute quantum permutations if enabled
-        if USE_QUANTUM:
+        if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
 
     # ------------------------------------------------------------------
-    # Quantum transform generation – deterministic pseudo‑random permutations
-    # (No Qiskit, no qasm – uses Python's random with fixed seeds)
+    # Quantum transform generation (using Qiskit circuit as seed, no simulation)
     # ------------------------------------------------------------------
-    def _generate_permutation(self, size: int, seed: int) -> List[int]:
-        """Generate a deterministic permutation of given size using seed."""
+    def _generate_permutation_from_circuit(self, num_qubits: int, seed: int) -> List[int]:
+        qc = QuantumCircuit(num_qubits)
         rng = random.Random(seed)
-        perm = list(range(size))
-        rng.shuffle(perm)
-        return perm
+        for qubit in range(num_qubits):
+            qc.h(qubit)
+            qc.rz(rng.random() * 2 * math.pi, qubit)
+            qc.rx(rng.random() * 2 * math.pi, qubit)
+        for _ in range(num_qubits):
+            for i in range(num_qubits - 1):
+                qc.cx(i, i+1)
+            qc.barrier()
+            for i in range(num_qubits):
+                qc.rz(rng.random() * 2 * math.pi, i)
+                qc.rx(rng.random() * 2 * math.pi, i)
+
+        try:
+            qasm_str = qc.qasm()
+        except AttributeError:
+            qasm_str = qc.draw('text')
+
+        final_seed = seed + hash(qasm_str) % 1000000
+        rng2 = random.Random(final_seed)
+        n = 1 << num_qubits
+        perm = list(range(n))
+        rng2.shuffle(perm)
+        if num_qubits == 12:  # ultra: need 2704 permutation
+            perm_2704 = list(range(2704))
+            rng2 = random.Random(final_seed)
+            rng2.shuffle(perm_2704)
+            return perm_2704
+        else:
+            return perm
 
     def _precompute_quantum_transforms(self):
-        """Precompute 9 fast (size 256) and 17 ultra (size 2704) permutations."""
         self.quantum_fast_perms = []
         for i in range(9):
             seed = 1000 + i
-            perm = self._generate_permutation(256, seed)
+            perm = self._generate_permutation_from_circuit(8, seed)
             self.quantum_fast_perms.append(perm)
 
         self.quantum_ultra_perms = []
         for i in range(17):
             seed = 2000 + i
-            perm = self._generate_permutation(2704, seed)
+            perm = self._generate_permutation_from_circuit(12, seed)
             self.quantum_ultra_perms.append(perm)
 
-        # Define transform functions for these permutations
         self.quantum_fast_transforms = []
         for perm in self.quantum_fast_perms:
             fwd, rev = self._make_substitution_transform(perm, 256)
@@ -261,36 +321,27 @@ class PAQJPCompressor:
             fwd, rev = self._make_permutation_transform(perm, 2704)
             self.quantum_ultra_transforms.append((fwd, rev))
 
-        # Add to transform maps (IDs 257-265 for fast, 266-282 for ultra)
-        # Fast: IDs 257-265
         for idx, (fwd, rev) in enumerate(self.quantum_fast_transforms, start=257):
             self.fwd_transforms[idx] = fwd
             self.rev_transforms[idx] = rev
-        # Ultra: IDs 266-282
         for idx, (fwd, rev) in enumerate(self.quantum_ultra_transforms, start=266):
             self.fwd_transforms[idx] = fwd
             self.rev_transforms[idx] = rev
 
     def _make_substitution_transform(self, perm: List[int], size: int):
-        """Substitution box on 'size' values (size must be 256 for fast)."""
         inv_perm = [0] * size
         for i, p in enumerate(perm):
             inv_perm[p] = i
-
         def forward(data: bytes) -> bytes:
             return bytes(perm[b] for b in data)
-
         def reverse(data: bytes) -> bytes:
             return bytes(inv_perm[b] for b in data)
-
         return forward, reverse
 
     def _make_permutation_transform(self, perm: List[int], block_size: int):
-        """Permutation of bytes within blocks of 'block_size'."""
         inv_perm = [0] * block_size
         for i, p in enumerate(perm):
             inv_perm[p] = i
-
         def forward(data: bytes) -> bytes:
             out = bytearray()
             for offset in range(0, len(data), block_size):
@@ -303,7 +354,6 @@ class PAQJPCompressor:
                         new_block[perm[i]] = block[i]
                     out += new_block
             return bytes(out)
-
         def reverse(data: bytes) -> bytes:
             out = bytearray()
             for offset in range(0, len(data), block_size):
@@ -316,11 +366,10 @@ class PAQJPCompressor:
                         new_block[inv_perm[i]] = block[i]
                     out += new_block
             return bytes(out)
-
         return forward, reverse
 
     # ------------------------------------------------------------------
-    # Dictionary loaders (unchanged)
+    # Dictionary loaders
     # ------------------------------------------------------------------
     def _load_static_dictionary(self):
         if not os.path.exists(COMBINED_DICTIONARY_FILE):
@@ -340,12 +389,11 @@ class PAQJPCompressor:
 
         sorted_words = sorted(words_set)
         word_to_idx = {w: i for i, w in enumerate(sorted_words)}
-        print(f"Loaded static word dictionary: {len(sorted_words)} unique words (from {COMBINED_DICTIONARY_FILE}).")
+        print(f"Loaded static word dictionary: {len(sorted_words)} unique words.")
         return sorted_words, word_to_idx
 
     def _load_line_dictionary(self):
         if not os.path.exists(COMBINED_DICTIONARY_FILE):
-            print(f"ERROR: {COMBINED_DICTIONARY_FILE} not found. Line dictionary disabled.")
             return [], {}
 
         lines = []
@@ -362,16 +410,15 @@ class PAQJPCompressor:
             return [], {}
 
         if not lines:
-            print("Warning: No phrases found. Line dictionary disabled.")
             return [], {}
 
         lines.sort(key=len, reverse=True)
         line_to_idx = {phrase: i for i, phrase in enumerate(lines)}
-        print(f"Loaded line dictionary: {len(lines)} phrases (first {MAX_LINE_ENTRIES} from {COMBINED_DICTIONARY_FILE}).")
+        print(f"Loaded line dictionary: {len(lines)} phrases.")
         return lines, line_to_idx
 
     # ------------------------------------------------------------------
-    # pi / constant helpers (unchanged)
+    # pi / constant helpers
     # ------------------------------------------------------------------
     def get_pi_digits(self, n: int) -> str:
         if n < 1: return ""
@@ -412,7 +459,6 @@ class PAQJPCompressor:
         for i in range(len(t)):
             t[i] ^= mask[i % len(mask)]
         return bytes(t)
-
     reverse_transform_17 = transform_17
 
     def get_basel_digits(self, n: int) -> str:
@@ -437,7 +483,7 @@ class PAQJPCompressor:
         return s[:n]
 
     # ------------------------------------------------------------------
-    # Seed tables, Fibonacci (unchanged)
+    # Seed tables, Fibonacci
     # ------------------------------------------------------------------
     def _gen_seed_tables(self, num=126, size=40, seed=42):
         random.seed(seed)
@@ -457,7 +503,7 @@ class PAQJPCompressor:
         return 0
 
     # ------------------------------------------------------------------
-    # Bit helpers (for RLE) (unchanged)
+    # Bit helpers (for RLE)
     # ------------------------------------------------------------------
     def _append_bits(self, bitlist: List[int], value: int, count: int):
         for i in range(count - 1, -1, -1):
@@ -471,7 +517,7 @@ class PAQJPCompressor:
         return val
 
     # ------------------------------------------------------------------
-    # RLE transform 00 (unchanged)
+    # RLE transform 00
     # ------------------------------------------------------------------
     def transform_00(self, data: bytes) -> bytes:
         if not data: return b'\x00'
@@ -618,7 +664,7 @@ class PAQJPCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01‑21 (unchanged)
+    # Transforms 01‑21
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
@@ -873,6 +919,18 @@ class PAQJPCompressor:
         t = bytearray(data)
         for i in range(len(t)): t[i] = (t[i] - shift) % 256
         return bytes(t)
+
+    # ------------------------------------------------------------------
+    # Transform 22 – Base64 encode/decode (bijection)
+    # ------------------------------------------------------------------
+    def transform_22(self, data: bytes) -> bytes:
+        return base64.b64encode(data)
+
+    def reverse_transform_22(self, data: bytes) -> bytes:
+        try:
+            return base64.b64decode(data, validate=False)
+        except Exception:
+            return data
 
     # ------------------------------------------------------------------
     # Transform 23 – SHA‑256 word tokenizer
@@ -1160,7 +1218,7 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     def transform_26(self, data: bytes) -> bytes:
         if not data: return b''
-        secret = b"PAQJP_TRANSFORM26_SECRET"
+        secret = b"PJP_TRANSFORM26_SECRET"
         result = bytearray()
         for idx in range(0, len(data), BLOCK_SIZE):
             chunk = data[idx:idx+BLOCK_SIZE]
@@ -1177,6 +1235,80 @@ class PAQJPCompressor:
     def reverse_transform_26(self, data: bytes) -> bytes:
         return self.transform_26(data)
 
+    # ------------------------------------------------------------------
+    # Transform 27 – 6‑bit text compression (lossless for alphabet text)
+    # ------------------------------------------------------------------
+    def transform_27(self, data: bytes) -> bytes:
+        """Encode text using 6‑bit alphabet and pack into bytes."""
+        try:
+            text = data.decode('utf-8')
+        except UnicodeDecodeError:
+            return data
+
+        # Check if all characters are in the alphabet
+        for ch in text:
+            if ch not in CHAR_TO_6BIT:
+                return data  # contains characters outside alphabet
+
+        # Encode to 6‑bit packed bytes
+        bits = []
+        for ch in text:
+            val = CHAR_TO_6BIT[ch]
+            # append 6 bits (big-endian)
+            for i in range(5, -1, -1):
+                bits.append((val >> i) & 1)
+
+        # Pad to multiple of 8 bits
+        pad = (8 - len(bits) % 8) % 8
+        bits.extend([0] * pad)
+
+        # Convert to bytes
+        out = bytearray()
+        for i in range(0, len(bits), 8):
+            byte = 0
+            for j in range(8):
+                byte = (byte << 1) | bits[i + j]
+            out.append(byte)
+
+        # Prefix with original length in bytes (to know how many characters)
+        length_bytes = struct.pack('<I', len(text))
+        return length_bytes + bytes(out)
+
+    def reverse_transform_27(self, data: bytes) -> bytes:
+        """Decode 6‑bit packed bytes back to text."""
+        if len(data) < 4:
+            return data
+        num_chars = struct.unpack('<I', data[:4])[0]
+        packed = data[4:]
+
+        # Unpack bits
+        bits = []
+        for b in packed:
+            for i in range(7, -1, -1):
+                bits.append((b >> i) & 1)
+
+        needed_bits = num_chars * 6
+        if len(bits) < needed_bits:
+            return data
+
+        chars = []
+        for i in range(num_chars):
+            val = 0
+            for j in range(6):
+                val = (val << 1) | bits[i*6 + j]
+            if val < 64:
+                chars.append(SIXBIT_TO_CHAR[val])
+            else:
+                return data
+
+        try:
+            return ''.join(chars).encode('utf-8')
+        except UnicodeEncodeError:
+            return data
+
+    # ------------------------------------------------------------------
+    # Transform 256 – no-op
+    # ------------------------------------------------------------------
     def transform_256(self, d: bytes) -> bytes:
         return d
     reverse_transform_256 = transform_256
@@ -1205,13 +1337,13 @@ class PAQJPCompressor:
         return tf, tf
 
     # ------------------------------------------------------------------
-    # Build transform maps (1..256) – include transforms 23,24,25,26
-    # and quantum transforms if enabled
+    # Build transform maps (1..256)
     # ------------------------------------------------------------------
     def _build_transform_maps(self):
         self.fwd_transforms: Dict[int, Callable] = {}
         self.rev_transforms: Dict[int, Callable] = {}
-        # Transforms 1‑22
+
+        # 1‑21
         self.fwd_transforms[1] = self.transform_00; self.rev_transforms[1] = self.reverse_transform_00
         self.fwd_transforms[2] = self.transform_01; self.rev_transforms[2] = self.reverse_transform_01
         self.fwd_transforms[3] = self.transform_02; self.rev_transforms[3] = self.reverse_transform_02
@@ -1234,19 +1366,31 @@ class PAQJPCompressor:
         self.fwd_transforms[20] = self.transform_19; self.rev_transforms[20] = self.reverse_transform_19
         self.fwd_transforms[21] = self.transform_20; self.rev_transforms[21] = self.reverse_transform_20
         self.fwd_transforms[22] = self.transform_21; self.rev_transforms[22] = self.reverse_transform_21
-        # Custom transforms 23,24,25,26
+
+        # 22 – Base64
+        self.fwd_transforms[22] = self.transform_22
+        self.rev_transforms[22] = self.reverse_transform_22
+
+        # 23‑26
         self.fwd_transforms[23] = self.transform_23; self.rev_transforms[23] = self.reverse_transform_23
         self.fwd_transforms[24] = self.transform_24; self.rev_transforms[24] = self.reverse_transform_24
         self.fwd_transforms[25] = self.transform_25; self.rev_transforms[25] = self.reverse_transform_25
         self.fwd_transforms[26] = self.transform_26; self.rev_transforms[26] = self.reverse_transform_26
-        # Transforms 27‑255 dynamic
-        for i in range(27, 256):
+
+        # 27 – 6‑bit text compression
+        self.fwd_transforms[27] = self.transform_27
+        self.rev_transforms[27] = self.reverse_transform_27
+
+        # 28‑255 dynamic
+        for i in range(28, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
-        # Transform 256 no-op
+
+        # 256 no-op
         self.fwd_transforms[256] = self.transform_256
         self.rev_transforms[256] = self.reverse_transform_256
+
         # Ensure all present
         for i in range(1, 257):
             if i not in self.fwd_transforms:
@@ -1393,14 +1537,12 @@ class PAQJPCompressor:
         best_total = float('inf')
         best_bytes = None
 
-        # Determine which transforms to search based on ultra flag and quantum enabled
         single_range = range(1, 257)  # always 256
-        if USE_QUANTUM:
-            # Fast quantum: 257-265 (9 transforms)
+        if USE_QUANTUM and HAS_QISKIT:
             fast_quantum = range(257, 266)
             single_range = list(single_range) + list(fast_quantum)
-            # Ultra quantum: 266-282 (17 transforms) are only used in ultra mode
-            ultra_quantum = range(266, 283) if ultra else []
+            if ultra:
+                single_range = list(single_range) + list(range(266, 283))
 
         # raw
         raw_backend = self._compress_backend(data, safe)
@@ -1409,7 +1551,7 @@ class PAQJPCompressor:
             best_total = len(candidate)
             best_bytes = candidate
 
-        # singles (including quantum if enabled)
+        # singles (including quantum and new transforms)
         for t in single_range:
             try:
                 transformed = self.fwd_transforms[t](data)
@@ -1423,7 +1565,6 @@ class PAQJPCompressor:
 
         # pairs – only if ultra mode is on
         if ultra:
-            # Include quantum ultra singles (266-282) in the single search already
             for t1, t2 in self.sequences:
                 try:
                     transformed = self._apply_sequence(data, (t1, t2))
@@ -1435,7 +1576,6 @@ class PAQJPCompressor:
                 except:
                     continue
 
-        # verify candidate
         decomp, _ = self._decompress_auto(best_bytes)
         if decomp != data:
             if not safe:
@@ -1673,7 +1813,6 @@ class PAQJPCompressor:
     def verify_transforms(self) -> bool:
         print("Verifying all 256+ transforms...")
         ok = True
-        # Check base 1-256
         for t in range(1, 257):
             test = bytes([0x55])
             try:
@@ -1687,8 +1826,7 @@ class PAQJPCompressor:
             except Exception:
                 print(f"Transform {t}: exception")
                 ok = False
-        # Check quantum transforms if enabled
-        if USE_QUANTUM:
+        if USE_QUANTUM and HAS_QISKIT:
             for t in range(257, 283):
                 test = bytes([0x55])
                 try:
@@ -1706,7 +1844,7 @@ class PAQJPCompressor:
         return ok
 
     # ------------------------------------------------------------------
-    # Exhaustive self‑test (option 4) – includes quantum if enabled
+    # Exhaustive self‑test (option 4)
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
@@ -1716,7 +1854,6 @@ class PAQJPCompressor:
 
         # 1. Single transforms on all bytes
         print("Testing all single transforms on all 256 byte values...")
-        # Base 1-256
         for t_num in range(1, 257):
             for b in range(256):
                 orig = bytes([b])
@@ -1741,7 +1878,7 @@ class PAQJPCompressor:
             return False
 
         # Quantum singles if enabled
-        if USE_QUANTUM:
+        if USE_QUANTUM and HAS_QISKIT:
             print("Testing quantum transforms on all 256 byte values...")
             for t_num in range(257, 283):
                 for b in range(256):
@@ -1856,11 +1993,36 @@ class PAQJPCompressor:
             return False
         print("  PASS: dynamic dictionary round‑trip OK")
 
-        print("\n[All tests passed – compressor is 100% lossless]")
-        return True
+        # Test 6‑bit transform (27)
+        print("\nTesting 6‑bit text compression (transform 27) on sample...")
+        sample_text = b"Hello world! How are you?\nThis is a test."
+        # This sample contains '!' and '?' which are not in our basic alphabet,
+        # so transform_27 should return it unchanged (lossless).
+        enc27 = self.transform_27(sample_text)
+        dec27 = self.reverse_transform_27(enc27)
+        if dec27 != sample_text:
+            print("  FAIL: 6‑bit transform round‑trip on sample with punctuation")
+            all_ok = False
+        else:
+            print("  PASS: 6‑bit transform round‑trip on sample with punctuation")
+        # Test with only alphabet chars
+        sample_alphabet = b"Hello World\nThis is a test"
+        enc27a = self.transform_27(sample_alphabet)
+        dec27a = self.reverse_transform_27(enc27a)
+        if dec27a != sample_alphabet:
+            print("  FAIL: 6‑bit transform on alphabet-only text")
+            all_ok = False
+        else:
+            print("  PASS: 6‑bit transform on alphabet-only text")
+
+        if all_ok:
+            print("\n[All tests passed – compressor is 100% lossless]")
+        else:
+            print("\n[FAIL] Some tests failed.")
+        return all_ok
 
     # ------------------------------------------------------------------
-    # NEW: Test 2704 transform-pairs & extraction check (option 6)
+    # Test 2704 transform-pairs & extraction check (option 6)
     # ------------------------------------------------------------------
     def test_2704_pairs_lossless(self) -> bool:
         print("=" * 60)
@@ -1928,18 +2090,14 @@ class PAQJPCompressor:
             print("  PASS: Ultra mode extraction OK")
 
         print("\nTesting extraction (decompression) for Hybrid mode...")
-        # Use temp file to simulate file compression/decompression
         with tempfile.NamedTemporaryFile(delete=False) as tmp_in:
             tmp_in.write(sample_text)
             tmp_in_name = tmp_in.name
         try:
             tmp_out_name = tmp_in_name + ".pjp"
-            # Compress with hybrid
             self.compress_file(tmp_in_name, tmp_out_name, ultra=True, hybrid=True)
-            # Decompress
             tmp_decomp_name = tmp_in_name + ".orig"
             self.decompress_file(tmp_out_name, tmp_decomp_name)
-            # Verify
             with open(tmp_decomp_name, 'rb') as f:
                 decomp_data = f.read()
             if decomp_data != sample_text:
@@ -1951,7 +2109,6 @@ class PAQJPCompressor:
             print(f"  FAIL: Hybrid extraction test raised {e}")
             all_ok = False
         finally:
-            # Cleanup temp files
             for fname in [tmp_in_name, tmp_out_name, tmp_decomp_name]:
                 if os.path.exists(fname):
                     os.remove(fname)
@@ -1985,8 +2142,8 @@ class PAQJPCompressor:
             if c_dynamic is not None:
                 candidates.append(('Dynamic-Dict', c_dynamic))
 
-        c_paqjp = self.compress_with_best(data, safe=False, ultra=ultra)
-        candidates.append(('PJP', c_paqjp))
+        c_pjp = self.compress_with_best(data, safe=False, ultra=ultra)
+        candidates.append(('PJP', c_pjp))
 
         best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
         try:
@@ -2044,13 +2201,12 @@ class PAQJPCompressor:
 # Main
 # ------------------------------------------------------------
 def main():
-    print(f"{PROGNAME}")
-    print("256 single transforms + 2704 transform‑pair sequences (100% lossless).")
-    print("Hybrid mode: static word dict, line dict, dynamic dict, and PJP.")
+    print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum")
+    print("Dictionary entries are read as plain text or Base64‑encoded UTF‑8.")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
 
-    c = PAQJPCompressor()
+    c = PJPCompressor()
     c.verify_transforms()
 
     choice = input("\n1) Fast (256 transforms + quantum if enabled)\n"
