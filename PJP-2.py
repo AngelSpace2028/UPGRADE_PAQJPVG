@@ -664,7 +664,7 @@ class PJPCompressor:
         return out
 
     # ------------------------------------------------------------------
-    # Transforms 01‑21
+    # Transforms 01‑21 (all bijective on bytes except 1,14 which are handled separately)
     # ------------------------------------------------------------------
     def transform_01(self, d, r=100):
         t = bytearray(d)
@@ -846,13 +846,7 @@ class PJPCompressor:
         for i in range(len(t)): t[i] ^= xor_value
         return bytes(t)
 
-    def transform_14(self, d):
-        if not d: return b'\x00'
-        checksum = sum(d) % 256
-        return d + bytes([checksum])
-    def reverse_transform_14(self, d):
-        if not d: return b''
-        return d[:-1]
+    # Transform 14 is NOT bijective; skipped in pair base.
 
     def transform_15(self, d):
         if len(d) < 1: return b''
@@ -921,7 +915,7 @@ class PJPCompressor:
         return bytes(t)
 
     # ------------------------------------------------------------------
-    # Transform 22 – Base64 encode/decode (bijection)
+    # Transform 22 – Base64 encode/decode (NOT bijective; skipped in pair base)
     # ------------------------------------------------------------------
     def transform_22(self, data: bytes) -> bytes:
         return base64.b64encode(data)
@@ -933,7 +927,7 @@ class PJPCompressor:
             return data
 
     # ------------------------------------------------------------------
-    # Transform 23 – SHA‑256 word tokenizer
+    # Transform 23 – SHA‑256 word tokenizer (text‑only, NOT bijective)
     # ------------------------------------------------------------------
     def transform_23(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
@@ -1016,7 +1010,7 @@ class PJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transform 24 – XOR‑prime word tokenizer
+    # Transform 24 – XOR‑prime word tokenizer (text‑only, NOT bijective)
     # ------------------------------------------------------------------
     def transform_24(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
@@ -1099,7 +1093,7 @@ class PJPCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transform 25 – Dynamic Dictionary Tokenizer
+    # Transform 25 – Dynamic Dictionary Tokenizer (text‑only, NOT bijective)
     # ------------------------------------------------------------------
     def _split_text_into_chunks(self, text: str, level: str = 'all') -> List[str]:
         if level == 'paragraph':
@@ -1214,7 +1208,7 @@ class PJPCompressor:
         return result if result is not None else b''
 
     # ------------------------------------------------------------------
-    # Transform 26 – SHA‑256 block masking
+    # Transform 26 – SHA‑256 block masking (bijective, can be included, but we exclude to be safe)
     # ------------------------------------------------------------------
     def transform_26(self, data: bytes) -> bytes:
         if not data: return b''
@@ -1236,7 +1230,7 @@ class PJPCompressor:
         return self.transform_26(data)
 
     # ------------------------------------------------------------------
-    # Transform 27 – 6‑bit text compression (lossless for alphabet text)
+    # Transform 27 – 6‑bit text compression (text‑only, NOT bijective)
     # ------------------------------------------------------------------
     def transform_27(self, data: bytes) -> bytes:
         """Encode text using 6‑bit alphabet and pack into bytes."""
@@ -1245,24 +1239,19 @@ class PJPCompressor:
         except UnicodeDecodeError:
             return data
 
-        # Check if all characters are in the alphabet
         for ch in text:
             if ch not in CHAR_TO_6BIT:
-                return data  # contains characters outside alphabet
+                return data
 
-        # Encode to 6‑bit packed bytes
         bits = []
         for ch in text:
             val = CHAR_TO_6BIT[ch]
-            # append 6 bits (big-endian)
             for i in range(5, -1, -1):
                 bits.append((val >> i) & 1)
 
-        # Pad to multiple of 8 bits
         pad = (8 - len(bits) % 8) % 8
         bits.extend([0] * pad)
 
-        # Convert to bytes
         out = bytearray()
         for i in range(0, len(bits), 8):
             byte = 0
@@ -1270,18 +1259,15 @@ class PJPCompressor:
                 byte = (byte << 1) | bits[i + j]
             out.append(byte)
 
-        # Prefix with original length in bytes (to know how many characters)
         length_bytes = struct.pack('<I', len(text))
         return length_bytes + bytes(out)
 
     def reverse_transform_27(self, data: bytes) -> bytes:
-        """Decode 6‑bit packed bytes back to text."""
         if len(data) < 4:
             return data
         num_chars = struct.unpack('<I', data[:4])[0]
         packed = data[4:]
 
-        # Unpack bits
         bits = []
         for b in packed:
             for i in range(7, -1, -1):
@@ -1358,28 +1344,24 @@ class PJPCompressor:
         self.fwd_transforms[12] = self.transform_11; self.rev_transforms[12] = self.reverse_transform_11
         self.fwd_transforms[13] = self.transform_12; self.rev_transforms[13] = self.reverse_transform_12
         self.fwd_transforms[14] = self.transform_13; self.rev_transforms[14] = self.reverse_transform_13
-        self.fwd_transforms[15] = self.transform_14; self.rev_transforms[15] = self.reverse_transform_14
-        self.fwd_transforms[16] = self.transform_15; self.rev_transforms[16] = self.reverse_transform_15
-        self.fwd_transforms[17] = self.transform_16; self.rev_transforms[17] = self.reverse_transform_16
-        self.fwd_transforms[18] = self.transform_17; self.rev_transforms[18] = self.reverse_transform_17
-        self.fwd_transforms[19] = self.transform_18; self.rev_transforms[19] = self.reverse_transform_18
-        self.fwd_transforms[20] = self.transform_19; self.rev_transforms[20] = self.reverse_transform_19
-        self.fwd_transforms[21] = self.transform_20; self.rev_transforms[21] = self.reverse_transform_20
-        self.fwd_transforms[22] = self.transform_21; self.rev_transforms[22] = self.reverse_transform_21
+        self.fwd_transforms[15] = self.transform_15; self.rev_transforms[15] = self.reverse_transform_15
+        self.fwd_transforms[16] = self.transform_16; self.rev_transforms[16] = self.reverse_transform_16
+        self.fwd_transforms[17] = self.transform_17; self.rev_transforms[17] = self.reverse_transform_17
+        self.fwd_transforms[18] = self.transform_18; self.rev_transforms[18] = self.reverse_transform_18
+        self.fwd_transforms[19] = self.transform_19; self.rev_transforms[19] = self.reverse_transform_19
+        self.fwd_transforms[20] = self.transform_20; self.rev_transforms[20] = self.reverse_transform_20
+        self.fwd_transforms[21] = self.transform_21; self.rev_transforms[21] = self.reverse_transform_21
 
         # 22 – Base64
         self.fwd_transforms[22] = self.transform_22
         self.rev_transforms[22] = self.reverse_transform_22
 
-        # 23‑26
+        # 23‑27 (text transforms)
         self.fwd_transforms[23] = self.transform_23; self.rev_transforms[23] = self.reverse_transform_23
         self.fwd_transforms[24] = self.transform_24; self.rev_transforms[24] = self.reverse_transform_24
         self.fwd_transforms[25] = self.transform_25; self.rev_transforms[25] = self.reverse_transform_25
         self.fwd_transforms[26] = self.transform_26; self.rev_transforms[26] = self.reverse_transform_26
-
-        # 27 – 6‑bit text compression
-        self.fwd_transforms[27] = self.transform_27
-        self.rev_transforms[27] = self.reverse_transform_27
+        self.fwd_transforms[27] = self.transform_27; self.rev_transforms[27] = self.reverse_transform_27
 
         # 28‑255 dynamic
         for i in range(28, 256):
@@ -1397,12 +1379,27 @@ class PJPCompressor:
                 raise RuntimeError(f"Transform {i} missing!")
 
     # ------------------------------------------------------------------
-    # Build pair sequences – 2704 (52×52)
+    # Build pair sequences – 2704 (52×52) using only bijective transforms
     # ------------------------------------------------------------------
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
-        base = list(range(1, 53))
+        # Collect the first 52 transforms that are bijective on all bytes.
+        # Exclude non‑bijective: 1, 14, 22, 23, 24, 25, 26, 27
+        safe = []
+        for i in range(1, 257):
+            if i in (1, 14, 22, 23, 24, 25, 26, 27):
+                continue
+            safe.append(i)
+            if len(safe) == 52:
+                break
+        # If we don't have 52, pad with 256 (identity) – but we should have enough.
+        while len(safe) < 52:
+            safe.append(256)
+        base = safe
         return [(t1, t2) for t1 in base for t2 in base]
 
+    # ------------------------------------------------------------------
+    # Apply and reverse sequences
+    # ------------------------------------------------------------------
     def _apply_sequence(self, data: bytes, seq: Tuple[int, ...]) -> bytes:
         result = data
         for t_num in seq:
@@ -1903,7 +1900,7 @@ class PJPCompressor:
                 print("\n[FAIL] Quantum transform test failed.")
                 return False
 
-        # 2. Pairs on all bytes
+        # 2. Pairs on all bytes (using the fixed safe base)
         print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
         for idx, seq in enumerate(self.sequences):
             for b in range(256):
@@ -1996,8 +1993,6 @@ class PJPCompressor:
         # Test 6‑bit transform (27)
         print("\nTesting 6‑bit text compression (transform 27) on sample...")
         sample_text = b"Hello world! How are you?\nThis is a test."
-        # This sample contains '!' and '?' which are not in our basic alphabet,
-        # so transform_27 should return it unchanged (lossless).
         enc27 = self.transform_27(sample_text)
         dec27 = self.reverse_transform_27(enc27)
         if dec27 != sample_text:
@@ -2005,7 +2000,6 @@ class PJPCompressor:
             all_ok = False
         else:
             print("  PASS: 6‑bit transform round‑trip on sample with punctuation")
-        # Test with only alphabet chars
         sample_alphabet = b"Hello World\nThis is a test"
         enc27a = self.transform_27(sample_alphabet)
         dec27a = self.reverse_transform_27(enc27a)
