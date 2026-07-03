@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Program – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
+PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Hybrid Dictionary Mode (Static Word, Line, Dynamic)
 + OPTIONAL QUANTUM‑INSPIRED TRANSFORMS (9 for Fast, 17 for Ultra)
 (No Qiskit / no qasm – purely deterministic pseudo‑random permutations)
@@ -14,7 +14,7 @@ perfect inverse.
 Options:
   1) Fast (256 transforms + 9 quantum if enabled)
   2) Ultra (256+2704 pairs + 17 quantum singles if enabled)
-  3) Hybrid (dicts + Program Ultra + quantum singles if enabled)
+  3) Hybrid (dicts + PJP Ultra + quantum singles if enabled)
   4) Full self‑test
   5) Decompress (extract)
   6) Test 2704 pairs & extraction check
@@ -86,7 +86,7 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
-PROGNAME = "Program"
+PROGNAME = "PJP"
 
 # ---------- Dictionary configuration ----------
 DICT_DIR = "Dictionaries"
@@ -1710,7 +1710,7 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
-        print("Program – FULL SELF‑TEST (100% lossless)")
+        print("PJP – FULL SELF‑TEST (100% lossless)")
         print("=" * 60)
         all_ok = True
 
@@ -1864,7 +1864,7 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     def test_2704_pairs_lossless(self) -> bool:
         print("=" * 60)
-        print("Program – TEST 2704 TRANSFORM‑PAIRS & EXTRACTION CHECK")
+        print("PJP – TEST 2704 TRANSFORM‑PAIRS & EXTRACTION CHECK")
         print("=" * 60)
         all_ok = True
 
@@ -1986,7 +1986,7 @@ class PAQJPCompressor:
                 candidates.append(('Dynamic-Dict', c_dynamic))
 
         c_paqjp = self.compress_with_best(data, safe=False, ultra=ultra)
-        candidates.append(('Program', c_paqjp))
+        candidates.append(('PJP', c_paqjp))
 
         best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
         try:
@@ -2046,7 +2046,7 @@ class PAQJPCompressor:
 def main():
     print(f"{PROGNAME}")
     print("256 single transforms + 2704 transform‑pair sequences (100% lossless).")
-    print("Hybrid mode: static word dict, line dict, dynamic dict, and Program.")
+    print("Hybrid mode: static word dict, line dict, dynamic dict, and PJP.")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
 
@@ -2055,7 +2055,7 @@ def main():
 
     choice = input("\n1) Fast (256 transforms + quantum if enabled)\n"
                    "2) Ultra (256+2704 pairs + quantum singles if enabled)\n"
-                   "3) Hybrid (dicts + Program Ultra + quantum singles if enabled)\n"
+                   "3) Hybrid (dicts + PJP Ultra + quantum singles if enabled)\n"
                    "4) Full self‑test\n"
                    "5) Decompress (extract)\n"
                    "6) Test 2704 pairs & extraction check\n"
