@@ -3,8 +3,8 @@
 """
 Program – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Hybrid Dictionary Mode (Static Word, Line, Dynamic)
-+ OPTIONAL QISKIT‑INSPIRED QUANTUM TRANSFORMS (9 for Fast, 17 for Ultra)
-(Auto‑correcting backends – marker‑free by default, safe fallback if needed)
++ OPTIONAL QUANTUM‑INSPIRED TRANSFORMS (9 for Fast, 17 for Ultra)
+(No Qiskit / no qasm – purely deterministic pseudo‑random permutations)
 ============================================================================
 
 All single transforms (1‑256), all ordered pairs (52×52=2704), and the raw
@@ -14,7 +14,7 @@ perfect inverse.
 Options:
   1) Fast (256 transforms + 9 quantum if enabled)
   2) Ultra (256+2704 pairs + 17 quantum singles if enabled)
-  3) Hybrid (dicts + PAQJP Ultra + quantum singles if enabled)
+  3) Hybrid (dicts + Program Ultra + quantum singles if enabled)
   4) Full self‑test
   5) Decompress (extract)
   6) Test 2704 pairs & extraction check
@@ -49,30 +49,13 @@ def install_package(pkg: str) -> bool:
         return False
 
 # ------------------------------------------------------------------
-# 1. Ask about quantum transforms – auto‑install if missing
+# 1. Ask about quantum transforms – no Qiskit needed
 # ------------------------------------------------------------------
 USE_QUANTUM = False
-HAS_QISKIT = False
-
-quantum_choice = input("Enable quantum‑inspired transforms (requires Qiskit)? (y/n): ").strip().lower()
+quantum_choice = input("Enable quantum‑inspired transforms (pseudo‑random permutations)? (y/n): ").strip().lower()
 if quantum_choice == 'y':
-    try:
-        from qiskit import QuantumCircuit
-        HAS_QISKIT = True
-        USE_QUANTUM = True
-        print("Quantum transforms ENABLED (Qiskit already installed).")
-    except ImportError:
-        print("Qiskit not found. Installing automatically...")
-        if install_package('qiskit'):
-            try:
-                from qiskit import QuantumCircuit
-                HAS_QISKIT = True
-                USE_QUANTUM = True
-                print("Quantum transforms ENABLED after automatic installation.")
-            except ImportError:
-                print("Qiskit installation succeeded but import failed – quantum transforms disabled.")
-        else:
-            print("Automatic installation failed – quantum transforms disabled.")
+    USE_QUANTUM = True
+    print("Quantum transforms ENABLED (using deterministic pseudo‑random permutations).")
 else:
     print("Quantum transforms disabled.")
 
@@ -102,15 +85,6 @@ try:
     HAS_ZSTD = True
 except ImportError:
     HAS_ZSTD = False
-
-# ---------- (Re‑import Qiskit if it was just installed) ----------
-if USE_QUANTUM and not HAS_QISKIT:
-    try:
-        from qiskit import QuantumCircuit
-        HAS_QISKIT = True
-    except ImportError:
-        USE_QUANTUM = False
-        print("Quantum transforms disabled because Qiskit could not be imported.")
 
 PROGNAME = "Program"
 
@@ -248,64 +222,32 @@ class PAQJPCompressor:
         self.line_dict, self.line_to_index = self._load_line_dictionary()
 
         # Precompute quantum permutations if enabled
-        if USE_QUANTUM and HAS_QISKIT:
+        if USE_QUANTUM:
             self._precompute_quantum_transforms()
 
     # ------------------------------------------------------------------
-    # Quantum transform generation (using Qiskit circuit as seed, no simulation)
+    # Quantum transform generation – deterministic pseudo‑random permutations
+    # (No Qiskit, no qasm – uses Python's random with fixed seeds)
     # ------------------------------------------------------------------
-    def _generate_permutation_from_circuit(self, num_qubits: int, seed: int) -> List[int]:
-        """
-        Build a quantum circuit and use its structure (gates and parameters)
-        to seed a deterministic permutation. No simulation or statevector is used.
-        """
-        qc = QuantumCircuit(num_qubits)
+    def _generate_permutation(self, size: int, seed: int) -> List[int]:
+        """Generate a deterministic permutation of given size using seed."""
         rng = random.Random(seed)
-        # Add some gates with random angles
-        for qubit in range(num_qubits):
-            qc.h(qubit)
-            qc.rz(rng.random() * 2 * math.pi, qubit)
-            qc.rx(rng.random() * 2 * math.pi, qubit)
-        for _ in range(num_qubits):
-            for i in range(num_qubits - 1):
-                qc.cx(i, i+1)
-            qc.barrier()
-            for i in range(num_qubits):
-                qc.rz(rng.random() * 2 * math.pi, i)
-                qc.rx(rng.random() * 2 * math.pi, i)
-
-        # Convert circuit to a string to use as additional seed source
-        qasm_str = qc.qasm()
-        # Combine seed with hash of qasm to get final seed
-        final_seed = seed + hash(qasm_str) % 1000000
-        rng2 = random.Random(final_seed)
-        n = 1 << num_qubits
-        perm = list(range(n))
-        rng2.shuffle(perm)
-        # For ultra (2704), we take the first 2704 elements if n > 2704
-        if num_qubits == 12:  # ultra: 2^12=4096, we need 2704
-            # Since we need a bijection on 2704, we can just take the first 2704
-            # but that would not be a bijection. Instead we generate a permutation of 2704 directly.
-            # We'll just generate a permutation of 2704 using the seed.
-            perm_2704 = list(range(2704))
-            rng2 = random.Random(final_seed)
-            rng2.shuffle(perm_2704)
-            return perm_2704
-        else:
-            return perm
+        perm = list(range(size))
+        rng.shuffle(perm)
+        return perm
 
     def _precompute_quantum_transforms(self):
-        """Precompute 9 fast (8 qubits) and 17 ultra (12 qubits) permutations."""
+        """Precompute 9 fast (size 256) and 17 ultra (size 2704) permutations."""
         self.quantum_fast_perms = []
         for i in range(9):
             seed = 1000 + i
-            perm = self._generate_permutation_from_circuit(8, seed)
+            perm = self._generate_permutation(256, seed)
             self.quantum_fast_perms.append(perm)
 
         self.quantum_ultra_perms = []
         for i in range(17):
             seed = 2000 + i
-            perm = self._generate_permutation_from_circuit(12, seed)
+            perm = self._generate_permutation(2704, seed)
             self.quantum_ultra_perms.append(perm)
 
         # Define transform functions for these permutations
@@ -1453,7 +1395,7 @@ class PAQJPCompressor:
 
         # Determine which transforms to search based on ultra flag and quantum enabled
         single_range = range(1, 257)  # always 256
-        if USE_QUANTUM and HAS_QISKIT:
+        if USE_QUANTUM:
             # Fast quantum: 257-265 (9 transforms)
             fast_quantum = range(257, 266)
             single_range = list(single_range) + list(fast_quantum)
@@ -1746,7 +1688,7 @@ class PAQJPCompressor:
                 print(f"Transform {t}: exception")
                 ok = False
         # Check quantum transforms if enabled
-        if USE_QUANTUM and HAS_QISKIT:
+        if USE_QUANTUM:
             for t in range(257, 283):
                 test = bytes([0x55])
                 try:
@@ -1799,7 +1741,7 @@ class PAQJPCompressor:
             return False
 
         # Quantum singles if enabled
-        if USE_QUANTUM and HAS_QISKIT:
+        if USE_QUANTUM:
             print("Testing quantum transforms on all 256 byte values...")
             for t_num in range(257, 283):
                 for b in range(256):
