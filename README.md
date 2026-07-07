@@ -29,19 +29,19 @@ Group: Jurijus Pacalovas and Vincent Geoghegan helped add 1 byte to the front ma
 Here is Portfolio UPGRADE_PAQJPVG
 We have written 9 versions of software and me help little bit Vincent Geoghegan
 
-PAQJP_8.2;
-PAQJP 8.3;
-PAQJP_8.4;
-PAQJP_8.5;
-PAQJP_8.5Long;
-PAQJP_8.6;
-PAQJP_8.8;
-PAQJP_8.9;
-PAQJP_9.0
-PJP
-PJP-2
-PJP-3
-
+1.PAQJP_8.2;
+2.PAQJP 8.3;
+3.PAQJP_8.4;
+4.PAQJP_8.5;
+5.PAQJP_8.5Long;
+6.PAQJP_8.6;
+7.PAQJP_8.8;
+8.PAQJP_8.9;
+9.PAQJP_9.0
+10.PJP
+11.PJP-2
+12.PJP-3
+12 v
 All Hybrid software tested Software is working correctly without bugs and without Errors
 
 The best our PJP-3
