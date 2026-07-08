@@ -1,4 +1,4 @@
-UPGRADE\_PAQJPVG Compression hybrid Software PJP-3 Quantum software is working correctly without bugs and without Errors
+UPGRADE\_PAQJPVG Compression hybrid Software PJP-2,3 Quantum software is working correctly without bugs and without Errors, The best PJP-3
 
 PAQJPVG_8.5-4 Replit App by Jurijus Pacalovas 8.5L-4 PAQ level 9 and zstandard level 22
 https://6d12ff49-574e-490c-a27e-ce0b42018552-00-2nsbwpijno5md.kirk.replit.dev
