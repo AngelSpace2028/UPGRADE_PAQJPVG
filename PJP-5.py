@@ -2464,72 +2464,39 @@ class PJPCompressor:
 
     def _decode_key_unary(self, data: bytes, pos: int) -> Tuple[int, int]:
         """
-        Decode a key from byte stream starting at byte position `pos`.
+        Decode a 16‑bit key from the byte stream starting at byte position `pos`.
         Returns (key, new_pos).
+        Uses unary prefix: zeros + '1' to indicate bit length, then the key bits.
         """
-        bit_pos = pos * 8
-        # Collect bits from current position until we find a '1'
-        bits = []
-        idx = pos
+        bit_idx = pos * 8
+        # Count zeros until we hit a '1'
+        zeros = 0
         while True:
-            if idx >= len(data):
+            byte_idx = bit_idx // 8
+            bit_off = bit_idx % 8
+            if byte_idx >= len(data):
                 raise ValueError("End of data while decoding unary key")
-            byte = data[idx]
-            for b in range(7, -1, -1):
-                bit = (byte >> b) & 1
-                bits.append(bit)
-                if bit == 1:
-                    # Found the '1' – now read the key bits
-                    # bits now contains: zeros..., then a '1'
-                    # The number of bits before the '1' is the length-1
-                    zeros = 0
-                    for bit in bits:
-                        if bit == 1:
-                            break
-                        zeros += 1
-                    length = zeros + 1
-                    # Now we need to read 'length' bits after the '1'
-                    # We have already consumed the prefix up to the '1'
-                    # The next 'length' bits are the key
-                    key_bits = []
-                    # We have already read the prefix bits into `bits`; we need to
-                    # continue reading from the next bit.
-                    # We can start from the position after the '1' within the bits list.
-                    # But since we are streaming bits, easier: we know the bit position
-                    # of the '1' within the current bit stream.
-                    # We'll compute the total bit offset.
-                    # The prefix consumed length bits (zeros + 1).
-                    # After the '1', we need 'length' bits.
-                    # We'll read them from the byte stream.
-                    # We already consumed the prefix; we need to read `length` bits.
-                    # We'll use the bit position from the original start.
-                    # We have consumed `len(prefix_bits)` bits.
-                    prefix_bits_len = length  # zeros + 1
-                    # Now we need to read `length` more bits.
-                    # We'll use a helper to read bits from data.
-                    # Simpler: use a bit index.
-                    bit_index = pos * 8 + prefix_bits_len
-                    # read `length` bits
-                    key = 0
-                    for i in range(length):
-                        byte_idx = bit_index // 8
-                        bit_off = bit_index % 8
-                        if byte_idx >= len(data):
-                            raise ValueError("Unexpected end of data")
-                        byte = data[byte_idx]
-                        bit = (byte >> (7 - bit_off)) & 1
-                        key = (key << 1) | bit
-                        bit_index += 1
-                    # New byte position is bit_index // 8
-                    new_pos = bit_index // 8
-                    # If we have leftover bits, they are in the same byte; we keep that.
-                    # We'll return the byte position of the next byte start (after the key).
-                    # If the key ends at a bit boundary, new_pos is correct.
-                    # If the key ends in the middle of a byte, the remaining bits of that byte
-                    # are part of the next key. So we keep the same byte position.
-                    return key, new_pos
-            idx += 1
-        return 0, pos
+            byte = data[byte_idx]
+            bit = (byte >> (7 - bit_off)) & 1
+            bit_idx += 1
+            if bit == 1:
+                break
+            zeros += 1
+        length = zeros + 1  # number of bits for the key
+        # Now read `length` bits as the key
+        key = 0
+        for _ in range(length):
+            byte_idx = bit_idx // 8
+            bit_off = bit_idx % 8
+            if byte_idx >= len(data):
+                raise ValueError("Unexpected end of data while reading key bits")
+            byte = data[byte_idx]
+            bit = (byte >> (7 - bit_off)) & 1
+            key = (key << 1) | bit
+            bit_idx += 1
+        # new byte position is floor(bit_idx / 8)
+        new_pos = bit_idx // 8
+        return key, new_pos
 
     def _find_best_two_pass_keys(self, block: bytes, quantum_boost: bool = False, time_limit: float = 60.0) -> Tuple[int, int, bytes]:
         """
