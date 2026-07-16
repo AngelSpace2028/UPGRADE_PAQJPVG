@@ -2588,6 +2588,28 @@ class PJPCompressor:
         return b''.join(transformed_parts), keys
 
     # ------------------------------------------------------------------
+    # Internal Zaden round‑trip test for Options 5 and 7
+    # ------------------------------------------------------------------
+    def _test_zaden_roundtrip(self, data: bytes) -> bool:
+        """Test Zaden compression/decompression round-trip."""
+        try:
+            block_size = 256
+            quantum_boost = False
+            time_limit = 5.0  # quick test
+            transformed_data, keys = self._block_optimize(data, block_size, quantum_boost, time_limit)
+            inner_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
+                                                       include_28=True, include_29=True, include_30=True)
+            magic = b'ZADN'
+            num_blocks = len(keys)
+            header = struct.pack('<II', block_size, num_blocks)
+            key_bytes = b''.join(self._encode_key_unary(k1) + self._encode_key_unary(k2) for k1, k2 in keys)
+            compressed = magic + header + key_bytes + inner_compressed
+            decompressed = self.decompress_block_optimized(compressed)
+            return decompressed == data
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
     # Helper: compress with hybrid (Option 4 style) and return bytes
     # ------------------------------------------------------------------
     def _compress_hybrid_bytes(self, data: bytes) -> Tuple[bytes, str]:
@@ -2848,13 +2870,14 @@ class PJPCompressor:
         return ok
 
     # ------------------------------------------------------------------
-    # Full self‑test (exhaustive)
+    # Full self‑test (exhaustive) – now includes Zaden
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
         print("PJP – FULL SELF‑TEST (100% lossless)")
         print("=" * 60)
         all_ok = True
+        rng = random.Random(12345)
 
         # 1. Single transforms on all bytes
         print("Testing all single transforms on all 256 byte values...")
@@ -2934,7 +2957,6 @@ class PJPCompressor:
 
         # 3. Random data full pipeline
         print("\nTesting random 1000‑byte block through full compress/decompress...")
-        rng = random.Random(12345)
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
 
         for mode_name, safe in [("marker‑free", False), ("safe", True)]:
@@ -3091,6 +3113,15 @@ class PJPCompressor:
         except ImportError:
             print("\n  SKIP: python-docx not installed, cannot test transforms 31 & 32.")
 
+        # **** NEW: Zaden round‑trip test ****
+        print("\nTesting Zaden block optimization round‑trip...")
+        test_zaden_data = bytes(rng.randint(0, 255) for _ in range(512))
+        if not self._test_zaden_roundtrip(test_zaden_data):
+            print("  FAIL: Zaden round‑trip mismatch")
+            all_ok = False
+        else:
+            print("  PASS: Zaden round‑trip OK")
+
         if all_ok:
             print("\n[All tests passed – compressor is 100% lossless]")
         else:
@@ -3098,7 +3129,7 @@ class PJPCompressor:
         return all_ok
 
     # ------------------------------------------------------------------
-    # Test 2704 pairs & extraction check
+    # Test 2704 pairs & extraction check – now includes Zaden
     # ------------------------------------------------------------------
     def test_2704_pairs_lossless(self) -> bool:
         print("=" * 60)
@@ -3192,6 +3223,15 @@ class PJPCompressor:
                 if os.path.exists(fname):
                     os.remove(fname)
 
+        # **** NEW: Zaden extraction test ****
+        print("\nTesting Zaden extraction (decompression) for block-optimized data...")
+        zaden_sample = b"Zaden extraction test data. " * 30  # ~780 bytes
+        if not self._test_zaden_roundtrip(zaden_sample):
+            print("  FAIL: Zaden extraction mismatch")
+            all_ok = False
+        else:
+            print("  PASS: Zaden extraction OK")
+
         if all_ok:
             print("\n[All 2704 pair tests and extraction checks passed – system is 100% lossless]")
         else:
@@ -3253,9 +3293,9 @@ def main():
         print("2) Ultra (no 28-30) – 256 singles + 2704 pairs")
         print("3) Hybrid (no 28-30) – dicts + Ultra")
         print("4) Absolute (with 28, 29, 30) – all transforms")
-        print("5) Full self‑test")
+        print("5) Full self‑test (now includes Zaden)")
         print("6) Decompress (extract)")
-        print("7) Test 2704 pairs & extraction check")
+        print("7) Test 2704 pairs & extraction check (now includes Zaden)")
         print("8) Fast 256 transforms test (compress using 256 singles)")
         print("9) Zaden + Absolute compare (tries both, picks best)")
         print("0) Exit")
