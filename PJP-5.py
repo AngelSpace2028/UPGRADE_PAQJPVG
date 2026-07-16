@@ -7,6 +7,8 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Zaden Block Optimization (Option 9) – tries both Absolute (hybrid + all transforms)
   and block‑optimized compression, picks the smaller result.
   Time limit per block can be set from 1 to 300 seconds.
+  Zaden file header: single byte 0x33, followed by block_size (4 bytes LE),
+  num_blocks (4 bytes LE), then unary‑coded keys, then inner compressed data.
 ============================================================================
 """
 
@@ -2439,6 +2441,8 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     # Zaden Block Optimization with time‑limited search and variable‑length key coding
     # ------------------------------------------------------------------
+    ZADEN_MAGIC = 0x33  # single byte header
+
     def _encode_key_unary(self, key: int) -> bytes:
         """
         Encode a 16‑bit key with unary prefix:
@@ -2566,7 +2570,7 @@ class PJPCompressor:
             transformed_data, keys = self._block_optimize(data, block_size, quantum_boost, time_limit)
             inner_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
                                                        include_28=True, include_29=True, include_30=True)
-            magic = b'ZADN'
+            magic = bytes([self.ZADEN_MAGIC])
             num_blocks = len(keys)
             header = struct.pack('<II', block_size, num_blocks)
             key_bytes = b''.join(self._encode_key_unary(k1) + self._encode_key_unary(k2) for k1, k2 in keys)
@@ -2625,8 +2629,8 @@ class PJPCompressor:
         # Compress the transformed data with Ultra (can also use hybrid, but we use Ultra for speed)
         block_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
                                                    include_28=True, include_29=True, include_30=True)
-        # Build final output: magic "ZADN", header, keys, inner compressed
-        magic = b'ZADN'
+        # Build final output: magic 0x33, header, keys, inner compressed
+        magic = bytes([self.ZADEN_MAGIC])
         num_blocks = len(keys)
         header = struct.pack('<II', block_size, num_blocks)
         key_bytes = b''.join(self._encode_key_unary(k1) + self._encode_key_unary(k2) for k1, k2 in keys)
@@ -2698,8 +2702,8 @@ class PJPCompressor:
             print(f"Error reading file: {e}")
             return
 
-        # Check for Zaden magic
-        if data.startswith(b'ZADN'):
+        # Check for Zaden magic (0x33)
+        if len(data) > 0 and data[0] == self.ZADEN_MAGIC:
             original = self.decompress_block_optimized(data)
             if original is not None:
                 with open(outfile, 'wb') as f:
@@ -2746,9 +2750,9 @@ class PJPCompressor:
         print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
 
     def decompress_block_optimized(self, data: bytes) -> Optional[bytes]:
-        if not data.startswith(b'ZADN'):
+        if len(data) == 0 or data[0] != self.ZADEN_MAGIC:
             return None
-        pos = 4
+        pos = 1  # skip magic byte
         if len(data) < pos + 8:
             return None
         block_size, num_blocks = struct.unpack('<II', data[pos:pos+8])
@@ -3246,6 +3250,7 @@ def main():
     print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30 + .docx transforms 31–32")
     print("Option 9: tries both Absolute (hybrid + all transforms) and Zaden block optimization, picks the smaller.")
     print("         Time limit per block can be set from 1 to 300 seconds.")
+    print("         Zaden files use a single‑byte header: 0x33.")
     print("Dictionary entries are read as plain text or Base64‑encoded UTF‑8.")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
