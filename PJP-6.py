@@ -79,9 +79,9 @@ else:
 # ------------------------------------------------------------------
 # 2. Ask about other optional compression backends (zstandard, paq, etc.)
 # ------------------------------------------------------------------
-other_choice = input("Install other optional compression backends (zstandard, paq, mpmath, cython, python-docx, gdown)? (y/n): ").strip().lower()
+other_choice = input("Install other optional compression backends (zstandard, paq, mpmath, cython, python-docx)? (y/n): ").strip().lower()
 if other_choice == 'y':
-    for pkg in ['mpmath', 'zstandard', 'cython', 'paq', 'python-docx', 'gdown']:
+    for pkg in ['mpmath', 'zstandard', 'cython', 'paq', 'python-docx']:
         try:
             importlib.import_module(pkg)
         except ImportError:
@@ -102,12 +102,6 @@ try:
     HAS_ZSTD = True
 except ImportError:
     HAS_ZSTD = False
-
-try:
-    import gdown
-    HAS_GDOWN = True
-except ImportError:
-    HAS_GDOWN = False
 
 # ---------- (Re‑import Qiskit if it was just installed) ----------
 if USE_QUANTUM and not HAS_QISKIT:
@@ -167,21 +161,20 @@ def download_and_merge_dictionaries():
     all_words = set()
     success_count = 0
 
-    print("Downloading dictionary files. If this fails, the program will skip text-tokenization transforms and continue.")
-
     for idx, (filename, url) in enumerate(zip(DICTIONARY_FILES, DICTIONARY_URLS)):
         local_path = os.path.join(DICT_DIR, filename)
         print(f"Downloading {filename} to {DICT_DIR}/ ...")
         try:
-            if HAS_GDOWN:
-                import gdown
-                gdown.download(url, local_path, quiet=False)
-            else:
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req) as response:
-                    content = response.read()
-                with open(local_path, 'wb') as f:
-                    f.write(content)
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response:
+                content = response.read()
+
+            if b'<html' in content[:200].lower():
+                print(f"  WARNING: {filename} appears to be an HTML page (not a text file). Skipping.")
+                continue
+
+            with open(local_path, 'wb') as f:
+                f.write(content)
 
             with open(local_path, 'r', encoding='utf-8', errors='ignore') as f:
                 for line in f:
@@ -204,8 +197,8 @@ def download_and_merge_dictionaries():
                 os.remove(local_path)
 
     if success_count == 0:
-        print("WARNING: No dictionary files could be downloaded.")
-        print("Proceeding without static word and line dictionaries. Text transforms may not work, but byte compression remains functional.")
+        print("ERROR: No dictionary files could be downloaded.")
+        print("Proceeding without static word and line dictionaries.")
         return False
 
     try:
@@ -257,7 +250,7 @@ SIXBIT_TO_CHAR = {i: ch for ch, i in CHAR_TO_6BIT.items()}
 # ---------- Main Compressor Class ----------
 class PJPCompressor:
     def __init__(self):
-        self.dictionaries_loaded = download_and_merge_dictionaries()
+        download_and_merge_dictionaries()
 
         self.PI_DIGITS = PI_DIGITS.copy()
         self.seed_tables = self._gen_seed_tables(num=126, size=40, seed=42)
@@ -268,13 +261,8 @@ class PJPCompressor:
         self.sequences = self._build_pair_sequences()
         self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}
 
-        if self.dictionaries_loaded:
-            self.static_dict, self.word_to_index = self._load_static_dictionary()
-            self.line_dict, self.line_to_index = self._load_line_dictionary()
-        else:
-            self.static_dict, self.word_to_index = [], {}
-            self.line_dict, self.line_to_index = [], {}
-            print("WARNING: Dictionary transforms 23-27 will be unusable because no dictionary was loaded.")
+        self.static_dict, self.word_to_index = self._load_static_dictionary()
+        self.line_dict, self.line_to_index = self._load_line_dictionary()
 
         # Precompute quantum permutations if enabled
         if USE_QUANTUM and HAS_QISKIT:
@@ -391,6 +379,7 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     def _load_static_dictionary(self):
         if not os.path.exists(COMBINED_DICTIONARY_FILE):
+            print(f"ERROR: {COMBINED_DICTIONARY_FILE} not found. No dictionaries loaded.")
             return [], {}
 
         words_set = set()
@@ -2463,8 +2452,9 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     # Zaden Block Optimization with time‑limited search and variable‑length key coding
     # ------------------------------------------------------------------
-    # Magic bytes kept as raw integers (0x33, 0x34, 0x35) as originally requested.
-    # No Zaden class variables are defined.
+    ZADEN_MAGIC = 0x33          # original 2‑pass
+    ZADEN_VAR_MAGIC = 0x34      # variable passes ≤ 255
+    ZADEN_VAR_UNARY_MAGIC = 0x35  # variable passes (unary count) for any number of passes
 
     def _encode_unary_count(self, count: int) -> bytes:
         """Encode a non‑negative integer with unary prefix + value bits (same as key)."""
@@ -2675,7 +2665,7 @@ class PJPCompressor:
             transformed_data, keys = self._block_optimize_variable(data, block_size, 2, quantum_boost, time_limit)
             inner_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
                                                        include_28=True, include_29=True, include_30=True)
-            magic = bytes([0x33])
+            magic = bytes([self.ZADEN_MAGIC])
             num_blocks = len(keys)
             header = struct.pack('<II', block_size, num_blocks)
             key_bytes = b''.join(self._encode_key_unary(k1) + self._encode_key_unary(k2) for k1, k2 in keys)
@@ -2696,7 +2686,7 @@ class PJPCompressor:
                                                        include_28=True, include_29=True, include_30=True)
             # Use magic based on pass count
             if num_passes <= 255:
-                magic = bytes([0x34])
+                magic = bytes([self.ZADEN_VAR_MAGIC])
                 num_blocks = len(keys_per_block)
                 header = struct.pack('<II', block_size, num_blocks)
                 key_bytes = bytearray()
@@ -2705,7 +2695,7 @@ class PJPCompressor:
                     for k in keys:
                         key_bytes += self._encode_key_unary(k)
             else:
-                magic = bytes([0x35])
+                magic = bytes([self.ZADEN_VAR_UNARY_MAGIC])
                 num_blocks = len(keys_per_block)
                 header = struct.pack('<II', block_size, num_blocks)
                 key_bytes = bytearray()
@@ -2725,16 +2715,15 @@ class PJPCompressor:
     def _compress_hybrid_bytes(self, data: bytes, exclude_transforms: Optional[Set[int]] = None) -> Tuple[bytes, str]:
         """Compress data using hybrid dict + Ultra + all transforms, return (best_bytes, method_name)."""
         candidates = []
-        if self.dictionaries_loaded:
-            c_static = self._compress_static_dict(data)
-            if c_static is not None:
-                candidates.append(('Static-Word-Dict', c_static))
-            c_line = self._compress_line_dict(data)
-            if c_line is not None:
-                candidates.append(('Line-Dict', c_line))
-            c_dynamic = self._compress_dynamic_dict(data)
-            if c_dynamic is not None:
-                candidates.append(('Dynamic-Dict', c_dynamic))
+        c_static = self._compress_static_dict(data)
+        if c_static is not None:
+            candidates.append(('Static-Word-Dict', c_static))
+        c_line = self._compress_line_dict(data)
+        if c_line is not None:
+            candidates.append(('Line-Dict', c_line))
+        c_dynamic = self._compress_dynamic_dict(data)
+        if c_dynamic is not None:
+            candidates.append(('Dynamic-Dict', c_dynamic))
         c_pjp = self.compress_with_best(data, safe=False, ultra=True,
                                         include_28=True, include_29=True, include_30=True,
                                         exclude_transforms=exclude_transforms)
@@ -2784,14 +2773,14 @@ class PJPCompressor:
                                                        exclude_transforms={36})
             # Build final output according to magic
             if passes == 2:   # keep compatibility with original 2-pass magic 0x33
-                magic = bytes([0x33])
+                magic = bytes([self.ZADEN_MAGIC])
                 num_blocks = len(keys_per_block)
                 header = struct.pack('<II', block_size, num_blocks)
                 key_bytes = b''.join(self._encode_key_unary(k1) + self._encode_key_unary(k2)
                                      for ks in keys_per_block for k1, k2 in [ks])  # exactly 2 keys per block
                 block_full = magic + header + key_bytes + block_compressed
             elif passes <= 255:
-                magic = bytes([0x34])
+                magic = bytes([self.ZADEN_VAR_MAGIC])
                 num_blocks = len(keys_per_block)
                 header = struct.pack('<II', block_size, num_blocks)
                 key_bytes = bytearray()
@@ -2801,7 +2790,7 @@ class PJPCompressor:
                         key_bytes += self._encode_key_unary(k)
                 block_full = magic + header + bytes(key_bytes) + block_compressed
             else:
-                magic = bytes([0x35])
+                magic = bytes([self.ZADEN_VAR_UNARY_MAGIC])
                 num_blocks = len(keys_per_block)
                 header = struct.pack('<II', block_size, num_blocks)
                 key_bytes = bytearray()
@@ -2887,7 +2876,7 @@ class PJPCompressor:
             return
 
         # Check for Zaden magic (0x33, 0x34, 0x35)
-        if len(data) > 0 and data[0] in (0x33, 0x34, 0x35):
+        if len(data) > 0 and data[0] in (self.ZADEN_MAGIC, self.ZADEN_VAR_MAGIC, self.ZADEN_VAR_UNARY_MAGIC):
             original = self.decompress_block_optimized(data)
             if original is not None:
                 with open(outfile, 'wb') as f:
@@ -2938,7 +2927,7 @@ class PJPCompressor:
             return None
         magic = data[0]
         pos = 1
-        if magic == 0x33:
+        if magic == self.ZADEN_MAGIC:
             # Original 2‑pass format
             if len(data) < pos + 8:
                 return None
@@ -2949,7 +2938,7 @@ class PJPCompressor:
                 k1, pos = self._decode_key_unary(data, pos)
                 k2, pos = self._decode_key_unary(data, pos)
                 keys_per_block.append([k1, k2])
-        elif magic == 0x34:
+        elif magic == self.ZADEN_VAR_MAGIC:
             # variable passes (≤ 255) with byte count
             if len(data) < pos + 8:
                 return None
@@ -2966,7 +2955,7 @@ class PJPCompressor:
                     k, pos = self._decode_key_unary(data, pos)
                     keys.append(k)
                 keys_per_block.append(keys)
-        elif magic == 0x35:
+        elif magic == self.ZADEN_VAR_UNARY_MAGIC:
             # variable passes with unary count
             if len(data) < pos + 8:
                 return None
@@ -3492,95 +3481,84 @@ def main():
     EXCLUDE_36 = {36}
 
     while True:
-        try:
-            print("\n" + "="*50)
-            print("Menu:")
-            print("1) Fast (no 28-30) – 256 singles, exclude 33-36")
-            print("2) Ultra (no 28-30) – 256 singles + 2704 pairs, exclude 33-36")
-            print("3) Hybrid (no 28-30) – dicts + Ultra, exclude 33-36")
-            print("4) Absolute (with 28, 29, 30) – all transforms, exclude 33-36")
-            print("5) Full self‑test")
-            print("6) Decompress (extract)")
-            print("7) Test 2704 pairs & extraction check")
-            print("8) Fast 256 transforms test, exclude 33-36")
-            print("9) Zaden + Absolute compare (sweep passes only, exclude 36)")
-            print("10) EXHAUSTIVE Zaden search (passes, time, block size, all transforms)")
-            print("0) Exit")
-            print("="*50)
+        print("\n" + "="*50)
+        print("Menu:")
+        print("1) Fast (no 28-30) – 256 singles, exclude 33-36")
+        print("2) Ultra (no 28-30) – 256 singles + 2704 pairs, exclude 33-36")
+        print("3) Hybrid (no 28-30) – dicts + Ultra, exclude 33-36")
+        print("4) Absolute (with 28, 29, 30) – all transforms, exclude 33-36")
+        print("5) Full self‑test")
+        print("6) Decompress (extract)")
+        print("7) Test 2704 pairs & extraction check")
+        print("8) Fast 256 transforms test, exclude 33-36")
+        print("9) Zaden + Absolute compare (sweep passes only, exclude 36)")
+        print("10) EXHAUSTIVE Zaden search (passes, time, block size, all transforms)")
+        print("0) Exit")
+        print("="*50)
 
-            choice = get_menu_choice()
+        choice = get_menu_choice()
 
-            if choice == 0:
-                print("Exiting program. Goodbye!")
-                break
-
-            elif choice == 1:
-                i = input("Input file: ").strip()
-                o = input("Output file: ").strip() or i + ".pjp"
-                c.compress_file(i, o, ultra=False, hybrid=False,
-                                include_28=False, include_29=False, include_30=False,
-                                exclude_transforms=EXCLUDE_33_36)
-            elif choice == 2:
-                i = input("Input file: ").strip()
-                o = input("Output file: ").strip() or i + ".pjp"
-                c.compress_file(i, o, ultra=True, hybrid=False,
-                                include_28=False, include_29=False, include_30=False,
-                                exclude_transforms=EXCLUDE_33_36)
-            elif choice == 3:
-                i = input("Input file: ").strip()
-                o = input("Output file: ").strip() or i + ".pjp"
-                c.compress_file(i, o, ultra=True, hybrid=True,
-                                include_28=False, include_29=False, include_30=False,
-                                exclude_transforms=EXCLUDE_33_36)
-            elif choice == 4:
-                i = input("Input file: ").strip()
-                o = input("Output file: ").strip() or i + ".pjp"
-                c.compress_file(i, o, ultra=True, hybrid=True,
-                                include_28=True, include_29=True, include_30=True,
-                                exclude_transforms=EXCLUDE_33_36)
-            elif choice == 5:
-                c.full_self_test()
-            elif choice == 6:
-                i = input("Compressed file: ").strip()
-                o = input("Output file: ").strip() or i.rsplit('.', 1)[0] + ".orig"
-                c.decompress_file(i, o)
-            elif choice == 7:
-                c.test_2704_pairs_lossless()
-            elif choice == 8:
-                i = input("Input file: ").strip()
-                o = input("Output file: ").strip() or i + ".pjp"
-                c.compress_file(i, o, ultra=False, hybrid=False,
-                                include_28=False, include_29=False, include_30=False,
-                                exclude_transforms=EXCLUDE_33_36)
-            elif choice == 9:
-                i = input("Input file: ").strip()
-                o = input("Output file: ").strip() or i + ".pjp"
-                bs = get_positive_int("Block size (bytes, default 256): ", 256, 1, 65536)
-                qb = input("Use quantum‑boosted search? (y/n): ").strip().lower() == 'y'
-                tlim = get_positive_int("Time limit per block (seconds, default 60, 1-300): ", 60, 1, 300)
-                max_p = get_positive_int("Maximum number of Zaden passes to test (0..2^8192, default 2): ", 2, 0)
-                c.compress_with_best_plus_block(i, o, block_size=bs, quantum_boost=qb,
-                                                time_limit_per_block=float(tlim), max_passes=max_p)
-            elif choice == 10:
-                i = input("Input file: ").strip()
-                o = input("Output file: ").strip() or i + ".pjp"
-                max_p = get_positive_int("Max passes to test (0..2^8192, default 2): ", 2, 0)
-                qb = input("Use quantum‑boosted search? (y/n): ").strip().lower() == 'y'
-                # Note: Option 10 is not fully implemented in the screenshot's code, 
-                # but it is referenced. We keep it as a placeholder.
-                print("Option 10 requires the full exhaustive sweep implementation which is extensive. See Option 9 for similar functionality.")
-            
-            # After any operation (except exit), pause
-            if choice != 0:
-                input("\nPress Enter to return to the menu...")
-        
-        except KeyboardInterrupt:
-            print("\nExiting program.")
+        if choice == 0:
+            print("Exiting program. Goodbye!")
             break
-        except Exception as e:
-            print(f"\n[ERROR] An unexpected error occurred: {e}")
-            print("The program will continue running. Please check the inputs and try again.")
+
+        elif choice == 1:
+            i = input("Input file: ").strip()
+            o = input("Output file: ").strip() or i + ".pjp"
+            c.compress_file(i, o, ultra=False, hybrid=False,
+                            include_28=False, include_29=False, include_30=False,
+                            exclude_transforms=EXCLUDE_33_36)
+        elif choice == 2:
+            i = input("Input file: ").strip()
+            o = input("Output file: ").strip() or i + ".pjp"
+            c.compress_file(i, o, ultra=True, hybrid=False,
+                            include_28=False, include_29=False, include_30=False,
+                            exclude_transforms=EXCLUDE_33_36)
+        elif choice == 3:
+            i = input("Input file: ").strip()
+            o = input("Output file: ").strip() or i + ".pjp"
+            c.compress_file(i, o, ultra=True, hybrid=True,
+                            include_28=False, include_29=False, include_30=False,
+                            exclude_transforms=EXCLUDE_33_36)
+        elif choice == 4:
+            i = input("Input file: ").strip()
+            o = input("Output file: ").strip() or i + ".pjp"
+            c.compress_file(i, o, ultra=True, hybrid=True,
+                            include_28=True, include_29=True, include_30=True,
+                            exclude_transforms=EXCLUDE_33_36)
+        elif choice == 5:
+            c.full_self_test()
+        elif choice == 6:
+            i = input("Compressed file: ").strip()
+            o = input("Output file: ").strip() or i.rsplit('.', 1)[0] + ".orig"
+            c.decompress_file(i, o)
+        elif choice == 7:
+            c.test_2704_pairs_lossless()
+        elif choice == 8:
+            i = input("Input file: ").strip()
+            o = input("Output file: ").strip() or i + ".pjp"
+            c.compress_file(i, o, ultra=False, hybrid=False,
+                            include_28=False, include_29=False, include_30=False,
+                            exclude_transforms=EXCLUDE_33_36)
+        elif choice == 9:
+            i = input("Input file: ").strip()
+            o = input("Output file: ").strip() or i + ".pjp"
+            bs = get_positive_int("Block size (bytes, default 256): ", 256, 1, 65536)
+            qb = input("Use quantum‑boosted search? (y/n): ").strip().lower() == 'y'
+            tlim = get_positive_int("Time limit per block (seconds, default 60, 1-300): ", 60, 1, 300)
+            max_p = get_positive_int("Maximum number of Zaden passes to test (0..2^8192, default 2): ", 2, 0)
+            c.compress_with_best_plus_block(i, o, block_size=bs, quantum_boost=qb,
+                                            time_limit_per_block=float(tlim), max_passes=max_p)
+        elif choice == 10:
+            i = input("Input file: ").strip()
+            o = input("Output file: ").strip() or i + ".pjp"
+            max_p = get_positive_int("Max passes to test (0..2^8192, default 2): ", 2, 0)
+            qb = input("Use quantum‑boosted search? (y/n): ").strip().lower() == 'y'
+            c.compress_with_best_exhaustive(i, o, max_passes=max_p, quantum_boost=qb)
+
+        # After any operation (except exit), pause
+        if choice != 0:
             input("\nPress Enter to return to the menu...")
 
 if __name__ == "__main__":
-    main()
+    main() please correct please full code
