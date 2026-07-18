@@ -4,13 +4,15 @@
 PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Hybrid Dictionary Mode + Quantum Transforms + Base64 + 6‑bit Text
 + Transforms 28–30 + .docx transforms 31–32
-+ Zaden Block Optimization (Option 9) – tries both Absolute (hybrid + all transforms)
-  and block‑optimized compression, picks the smaller result.
-  Time limit per block can be set from 1 to 300 seconds.
-  Zaden file header: single byte 0x33 (original 2‑pass) or 0x34 (variable passes up to 255)
-  or 0x35 (variable passes with unary count for any number of passes).
-  Variable passes: user can specify max passes to test up to 2^8192,
-  the program tests pass counts 0 … max and chooses the best.
++ Zaden Block Optimization (Options 9 & 10)
+  Option  9: test passes 0..max_passes with a single time limit & block size.
+  Option 10: EXHAUSTIVE – test ALL combinations of passes (0..max_passes),
+             time limit (1..300 s) and block size (1..256 bytes).
+  Both pick the absolute smallest result among Absolute and Zaden variants.
+  Zaden magic: 0x33 (2 passes), 0x34 (≤255 passes), 0x35 (any passes).
+  MOD: Options 1,2,3,4,8 exclude transforms 33,34,35,36.
+       Option 9 excludes transform 36 (keeps 33-35).
+       Option 10 includes all.
 """
 
 import math
@@ -30,7 +32,7 @@ import zipfile
 import io
 import xml.etree.ElementTree as ET
 import time
-from typing import Optional, List, Tuple, Dict, Callable
+from typing import Optional, List, Tuple, Dict, Callable, Set
 from collections import Counter, defaultdict
 
 # ------------------------------------------------------------------
@@ -2131,11 +2133,12 @@ class PJPCompressor:
             return 0, ()
 
     # ------------------------------------------------------------------
-    # Main compression with auto‑correction – flags for 28, 29, 30
+    # Main compression with auto‑correction – new exclude_transforms parameter
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
                            include_28: bool = False, include_29: bool = False,
-                           include_30: bool = False) -> bytes:
+                           include_30: bool = False,
+                           exclude_transforms: Optional[Set[int]] = None) -> bytes:
         if not data:
             backend = self._compress_backend(b'', safe)
             compressed = self._encode_marker_raw() + backend
@@ -2144,14 +2147,20 @@ class PJPCompressor:
                 if decomp != b'':
                     return self.compress_with_best(data, safe=True, ultra=ultra,
                                                    include_28=include_28, include_29=include_29,
-                                                   include_30=include_30)
+                                                   include_30=include_30,
+                                                   exclude_transforms=exclude_transforms)
             return compressed
+
+        if exclude_transforms is None:
+            exclude_transforms = set()
 
         best_total = float('inf')
         best_bytes = None
 
-        # Build list of single transforms (1..256) – exclude 28-30 if not allowed
-        single_transforms = list(range(1, 257))
+        # Build list of single transforms (1..256) – exclude the specified ones
+        single_transforms = [t for t in range(1, 257) if t not in exclude_transforms]
+
+        # exclude 28-30 if not allowed
         if not include_28:
             single_transforms = [t for t in single_transforms if t != 28]
         if not include_29:
@@ -2213,7 +2222,8 @@ class PJPCompressor:
                 print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
                 return self.compress_with_best(data, safe=True, ultra=ultra,
                                                include_28=include_28, include_29=include_29,
-                                               include_30=include_30)
+                                               include_30=include_30,
+                                               exclude_transforms=exclude_transforms)
             else:
                 raise RuntimeError("Safe compression failed – unexpected internal error!")
         return best_bytes
@@ -2702,7 +2712,7 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     # Helper: compress with hybrid (Option 4 style) and return bytes
     # ------------------------------------------------------------------
-    def _compress_hybrid_bytes(self, data: bytes) -> Tuple[bytes, str]:
+    def _compress_hybrid_bytes(self, data: bytes, exclude_transforms: Optional[Set[int]] = None) -> Tuple[bytes, str]:
         """Compress data using hybrid dict + Ultra + all transforms, return (best_bytes, method_name)."""
         candidates = []
         c_static = self._compress_static_dict(data)
@@ -2715,7 +2725,8 @@ class PJPCompressor:
         if c_dynamic is not None:
             candidates.append(('Dynamic-Dict', c_dynamic))
         c_pjp = self.compress_with_best(data, safe=False, ultra=True,
-                                        include_28=True, include_29=True, include_30=True)
+                                        include_28=True, include_29=True, include_30=True,
+                                        exclude_transforms=exclude_transforms)
         candidates.append(('PJP-Absolute', c_pjp))
         best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
         return best_bytes, best_method
@@ -2735,10 +2746,10 @@ class PJPCompressor:
             print(f"Error reading file: {e}")
             return
 
-        # 1. Absolute compression (Option 4 style)
-        print("Running Absolute compression (hybrid + Ultra + all transforms 28-30)...")
+        # 1. Absolute compression (Option 4 style) – exclude 36
+        print("Running Absolute compression (hybrid + Ultra + all transforms 28-30, EXCLUDE 36)...")
         abs_start = time.time()
-        abs_bytes, abs_method = self._compress_hybrid_bytes(data)
+        abs_bytes, abs_method = self._compress_hybrid_bytes(data, exclude_transforms={36})
         abs_time = time.time() - abs_start
         abs_size = len(abs_bytes)
 
@@ -2756,9 +2767,10 @@ class PJPCompressor:
             transformed_data, keys_per_block = self._block_optimize_variable(
                 data, block_size, passes, quantum_boost, time_limit_per_block
             )
-            # Compress the transformed data with Ultra
+            # Compress the transformed data with Ultra – exclude 36
             block_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
-                                                       include_28=True, include_29=True, include_30=True)
+                                                       include_28=True, include_29=True, include_30=True,
+                                                       exclude_transforms={36})
             # Build final output according to magic
             if passes == 2:   # keep compatibility with original 2-pass magic 0x33
                 magic = bytes([self.ZADEN_MAGIC])
@@ -2822,7 +2834,8 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True, hybrid: bool = False,
                       include_28: bool = False, include_29: bool = False,
-                      include_30: bool = False):
+                      include_30: bool = False,
+                      exclude_transforms: Optional[Set[int]] = None):
         try:
             with open(infile, 'rb') as f:
                 data = f.read()
@@ -2832,12 +2845,13 @@ class PJPCompressor:
 
         # If hybrid is True, we use the same logic as _compress_hybrid_bytes
         if hybrid:
-            best_bytes, method = self._compress_hybrid_bytes(data)
+            best_bytes, method = self._compress_hybrid_bytes(data, exclude_transforms=exclude_transforms)
         else:
             candidates = []
             c_pjp = self.compress_with_best(data, safe=False, ultra=ultra,
                                             include_28=include_28, include_29=include_29,
-                                            include_30=include_30)
+                                            include_30=include_30,
+                                            exclude_transforms=exclude_transforms)
             candidates.append(('PJP', c_pjp))
             best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
             method = best_method
@@ -3421,16 +3435,16 @@ class PJPCompressor:
 # Main (with persistent menu loop and strict numeric input)
 # ------------------------------------------------------------
 def get_menu_choice():
-    """Prompt until a valid integer between 0 and 9 is entered."""
+    """Prompt until a valid integer between 0 and 10 is entered."""
     while True:
         try:
             choice = int(input("> ").strip())
-            if 0 <= choice <= 9:
+            if 0 <= choice <= 10:
                 return choice
             else:
-                print("Please enter a number from 0 to 9.")
+                print("Please enter a number from 0 to 10.")
         except ValueError:
-            print("Invalid input. Please enter a number (0-9).")
+            print("Invalid input. Please enter a number (0-10).")
 
 def get_positive_int(prompt: str, default: int, min_val: int = 1, max_val: int = None):
     """Get an integer within [min_val, max_val] (if max_val specified)."""
@@ -3452,29 +3466,33 @@ def get_positive_int(prompt: str, default: int, min_val: int = 1, max_val: int =
 
 def main():
     print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30 + .docx transforms 31–32")
-    print("Option 9: tries both Absolute (hybrid + all transforms) and Zaden block optimization, picks the smaller.")
-    print("         Time limit per block can be set from 1 to 300 seconds.")
-    print("         Zaden files use magic 0x33 (original 2-pass), 0x34 (≤255 passes), 0x35 (any passes).")
-    print("         Now you can test up to 2^8192 passes (input accepts huge integers).")
-    print("Dictionary entries are read as plain text or Base64‑encoded UTF‑8.")
+    print("Options 9 & 10: Zaden block optimization with exhaustive sweep.")
+    print("Transform exclusion rules:")
+    print("  Options 1,2,3,4,8 -> exclude {33,34,35,36}")
+    print("  Option 9 -> exclude {36} (keeps 33-35)")
+    print("  Option 10 -> no exclusion (includes 33-36)")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
 
     c = PJPCompressor()
     c.verify_transforms()
 
+    EXCLUDE_33_36 = {33, 34, 35, 36}
+    EXCLUDE_36 = {36}
+
     while True:
         print("\n" + "="*50)
         print("Menu:")
-        print("1) Fast (no 28-30) – 256 singles")
-        print("2) Ultra (no 28-30) – 256 singles + 2704 pairs")
-        print("3) Hybrid (no 28-30) – dicts + Ultra")
-        print("4) Absolute (with 28, 29, 30) – all transforms")
-        print("5) Full self‑test (now includes Zaden variable passes)")
+        print("1) Fast (no 28-30) – 256 singles, exclude 33-36")
+        print("2) Ultra (no 28-30) – 256 singles + 2704 pairs, exclude 33-36")
+        print("3) Hybrid (no 28-30) – dicts + Ultra, exclude 33-36")
+        print("4) Absolute (with 28, 29, 30) – all transforms, exclude 33-36")
+        print("5) Full self‑test")
         print("6) Decompress (extract)")
-        print("7) Test 2704 pairs & extraction check (now includes Zaden variable passes)")
-        print("8) Fast 256 transforms test (compress using 256 singles)")
-        print("9) Zaden + Absolute compare (tries multiple pass counts, picks best)")
+        print("7) Test 2704 pairs & extraction check")
+        print("8) Fast 256 transforms test, exclude 33-36")
+        print("9) Zaden + Absolute compare (sweep passes only, exclude 36)")
+        print("10) EXHAUSTIVE Zaden search (passes, time, block size, all transforms)")
         print("0) Exit")
         print("="*50)
 
@@ -3488,22 +3506,26 @@ def main():
             i = input("Input file: ").strip()
             o = input("Output file: ").strip() or i + ".pjp"
             c.compress_file(i, o, ultra=False, hybrid=False,
-                            include_28=False, include_29=False, include_30=False)
+                            include_28=False, include_29=False, include_30=False,
+                            exclude_transforms=EXCLUDE_33_36)
         elif choice == 2:
             i = input("Input file: ").strip()
             o = input("Output file: ").strip() or i + ".pjp"
             c.compress_file(i, o, ultra=True, hybrid=False,
-                            include_28=False, include_29=False, include_30=False)
+                            include_28=False, include_29=False, include_30=False,
+                            exclude_transforms=EXCLUDE_33_36)
         elif choice == 3:
             i = input("Input file: ").strip()
             o = input("Output file: ").strip() or i + ".pjp"
             c.compress_file(i, o, ultra=True, hybrid=True,
-                            include_28=False, include_29=False, include_30=False)
+                            include_28=False, include_29=False, include_30=False,
+                            exclude_transforms=EXCLUDE_33_36)
         elif choice == 4:
             i = input("Input file: ").strip()
             o = input("Output file: ").strip() or i + ".pjp"
             c.compress_file(i, o, ultra=True, hybrid=True,
-                            include_28=True, include_29=True, include_30=True)
+                            include_28=True, include_29=True, include_30=True,
+                            exclude_transforms=EXCLUDE_33_36)
         elif choice == 5:
             c.full_self_test()
         elif choice == 6:
@@ -3516,7 +3538,8 @@ def main():
             i = input("Input file: ").strip()
             o = input("Output file: ").strip() or i + ".pjp"
             c.compress_file(i, o, ultra=False, hybrid=False,
-                            include_28=False, include_29=False, include_30=False)
+                            include_28=False, include_29=False, include_30=False,
+                            exclude_transforms=EXCLUDE_33_36)
         elif choice == 9:
             i = input("Input file: ").strip()
             o = input("Output file: ").strip() or i + ".pjp"
@@ -3524,7 +3547,14 @@ def main():
             qb = input("Use quantum‑boosted search? (y/n): ").strip().lower() == 'y'
             tlim = get_positive_int("Time limit per block (seconds, default 60, 1-300): ", 60, 1, 300)
             max_p = get_positive_int("Maximum number of Zaden passes to test (0..2^8192, default 2): ", 2, 0)
-            c.compress_with_best_plus_block(i, o, block_size=bs, quantum_boost=qb, time_limit_per_block=float(tlim), max_passes=max_p)
+            c.compress_with_best_plus_block(i, o, block_size=bs, quantum_boost=qb,
+                                            time_limit_per_block=float(tlim), max_passes=max_p)
+        elif choice == 10:
+            i = input("Input file: ").strip()
+            o = input("Output file: ").strip() or i + ".pjp"
+            max_p = get_positive_int("Max passes to test (0..2^8192, default 2): ", 2, 0)
+            qb = input("Use quantum‑boosted search? (y/n): ").strip().lower() == 'y'
+            c.compress_with_best_exhaustive(i, o, max_passes=max_p, quantum_boost=qb)
 
         # After any operation (except exit), pause
         if choice != 0:
