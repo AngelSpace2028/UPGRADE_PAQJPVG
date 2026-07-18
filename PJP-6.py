@@ -7,9 +7,10 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Zaden Block Optimization (Option 9) – tries both Absolute (hybrid + all transforms)
   and block‑optimized compression, picks the smaller result.
   Time limit per block can be set from 1 to 300 seconds.
-  Zaden file header: single byte 0x33 (original 2‑pass) or 0x34 (variable passes).
-  Variable passes: user can specify max passes to test, the program tests
-  pass counts 0 … max and chooses the best.
+  Zaden file header: single byte 0x33 (original 2‑pass) or 0x34 (variable passes up to 255)
+  or 0x35 (variable passes with unary count for any number of passes).
+  Variable passes: user can specify max passes to test up to 2^8192,
+  the program tests pass counts 0 … max and chooses the best.
 """
 
 import math
@@ -2442,7 +2443,55 @@ class PJPCompressor:
     # Zaden Block Optimization with time‑limited search and variable‑length key coding
     # ------------------------------------------------------------------
     ZADEN_MAGIC = 0x33          # original 2‑pass
-    ZADEN_VAR_MAGIC = 0x34      # variable passes
+    ZADEN_VAR_MAGIC = 0x34      # variable passes ≤ 255
+    ZADEN_VAR_UNARY_MAGIC = 0x35  # variable passes (unary count) for any number of passes
+
+    def _encode_unary_count(self, count: int) -> bytes:
+        """Encode a non‑negative integer with unary prefix + value bits (same as key)."""
+        if count == 0:
+            bits = '0'
+            length = 1
+        else:
+            bits = bin(count)[2:]
+            length = len(bits)
+        prefix = '0' * (length - 1) + '1'
+        encoded_str = prefix + bits
+        pad = (8 - len(encoded_str) % 8) % 8
+        encoded_str += '0' * pad
+        out = bytearray()
+        for i in range(0, len(encoded_str), 8):
+            out.append(int(encoded_str[i:i+8], 2))
+        return bytes(out)
+
+    def _decode_unary_count(self, data: bytes, pos: int) -> Tuple[int, int]:
+        """Decode a unary‑coded count; returns (count, new_pos)."""
+        bit_idx = pos * 8
+        zeros = 0
+        while True:
+            byte_idx = bit_idx // 8
+            bit_off = bit_idx % 8
+            if byte_idx >= len(data):
+                raise ValueError("End of data while decoding unary count")
+            byte = data[byte_idx]
+            bit = (byte >> (7 - bit_off)) & 1
+            bit_idx += 1
+            if bit == 1:
+                break
+            zeros += 1
+        length = zeros + 1
+        count = 0
+        for _ in range(length):
+            byte_idx = bit_idx // 8
+            bit_off = bit_idx % 8
+            if byte_idx >= len(data):
+                raise ValueError("Unexpected end of data while reading count bits")
+            byte = data[byte_idx]
+            bit = (byte >> (7 - bit_off)) & 1
+            count = (count << 1) | bit
+            bit_idx += 1
+        bit_idx = ((bit_idx + 7) // 8) * 8
+        new_pos = bit_idx // 8
+        return count, new_pos
 
     def _encode_key_unary(self, key: int) -> bytes:
         """
@@ -2625,14 +2674,25 @@ class PJPCompressor:
             transformed_data, keys_per_block = self._block_optimize_variable(data, block_size, num_passes, quantum_boost, time_limit)
             inner_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
                                                        include_28=True, include_29=True, include_30=True)
-            magic = bytes([self.ZADEN_VAR_MAGIC])
-            num_blocks = len(keys_per_block)
-            header = struct.pack('<II', block_size, num_blocks)
-            key_bytes = bytearray()
-            for keys in keys_per_block:
-                key_bytes.append(len(keys))   # number of passes for this block
-                for k in keys:
-                    key_bytes += self._encode_key_unary(k)
+            # Use magic based on pass count
+            if num_passes <= 255:
+                magic = bytes([self.ZADEN_VAR_MAGIC])
+                num_blocks = len(keys_per_block)
+                header = struct.pack('<II', block_size, num_blocks)
+                key_bytes = bytearray()
+                for keys in keys_per_block:
+                    key_bytes.append(len(keys))   # number of passes for this block
+                    for k in keys:
+                        key_bytes += self._encode_key_unary(k)
+            else:
+                magic = bytes([self.ZADEN_VAR_UNARY_MAGIC])
+                num_blocks = len(keys_per_block)
+                header = struct.pack('<II', block_size, num_blocks)
+                key_bytes = bytearray()
+                for keys in keys_per_block:
+                    key_bytes += self._encode_unary_count(len(keys))
+                    for k in keys:
+                        key_bytes += self._encode_key_unary(k)
             compressed = magic + header + bytes(key_bytes) + inner_compressed
             decompressed = self.decompress_block_optimized(compressed)
             return decompressed == data
@@ -2661,7 +2721,7 @@ class PJPCompressor:
         return best_bytes, best_method
 
     # ------------------------------------------------------------------
-    # Enhanced Option 9: tries both Absolute and Zaden with multiple pass counts
+    # Enhanced Option 9: tries both Absolute and Zaden with multiple pass counts (up to 2^8192)
     # ------------------------------------------------------------------
     def compress_with_best_plus_block(self, infile: str, outfile: str,
                                       block_size: int = 256,
@@ -2688,8 +2748,10 @@ class PJPCompressor:
         best_method = None
 
         # 2. Test each pass count from 0 to max_passes
+        # Warning: max_passes can be huge, this will take forever for large values.
+        print(f"\nTesting Zaden with pass counts 0..{max_passes}...")
         for passes in range(0, max_passes + 1):
-            print(f"\n=== Testing Zaden block-optimized with {passes} passes ===")
+            print(f"=== Testing Zaden block-optimized with {passes} passes ===")
             block_start = time.time()
             transformed_data, keys_per_block = self._block_optimize_variable(
                 data, block_size, passes, quantum_boost, time_limit_per_block
@@ -2705,13 +2767,23 @@ class PJPCompressor:
                 key_bytes = b''.join(self._encode_key_unary(k1) + self._encode_key_unary(k2)
                                      for ks in keys_per_block for k1, k2 in [ks])  # exactly 2 keys per block
                 block_full = magic + header + key_bytes + block_compressed
-            else:
+            elif passes <= 255:
                 magic = bytes([self.ZADEN_VAR_MAGIC])
                 num_blocks = len(keys_per_block)
                 header = struct.pack('<II', block_size, num_blocks)
                 key_bytes = bytearray()
                 for ks in keys_per_block:
-                    key_bytes.append(len(ks))   # number of passes for this block
+                    key_bytes.append(len(ks))
+                    for k in ks:
+                        key_bytes += self._encode_key_unary(k)
+                block_full = magic + header + bytes(key_bytes) + block_compressed
+            else:
+                magic = bytes([self.ZADEN_VAR_UNARY_MAGIC])
+                num_blocks = len(keys_per_block)
+                header = struct.pack('<II', block_size, num_blocks)
+                key_bytes = bytearray()
+                for ks in keys_per_block:
+                    key_bytes += self._encode_unary_count(len(ks))
                     for k in ks:
                         key_bytes += self._encode_key_unary(k)
                 block_full = magic + header + bytes(key_bytes) + block_compressed
@@ -2779,7 +2851,7 @@ class PJPCompressor:
         print(f"Compressed {len(data)} → {len(best_bytes)} bytes ({method}) → {outfile}")
 
     # ------------------------------------------------------------------
-    # Decompression (handles both standard PJP and Zaden, now also variable passes)
+    # Decompression (handles all three Zaden formats)
     # ------------------------------------------------------------------
     def decompress_file(self, infile: str, outfile: str):
         try:
@@ -2789,8 +2861,8 @@ class PJPCompressor:
             print(f"Error reading file: {e}")
             return
 
-        # Check for Zaden magic (0x33 or 0x34)
-        if len(data) > 0 and data[0] in (self.ZADEN_MAGIC, self.ZADEN_VAR_MAGIC):
+        # Check for Zaden magic (0x33, 0x34, 0x35)
+        if len(data) > 0 and data[0] in (self.ZADEN_MAGIC, self.ZADEN_VAR_MAGIC, self.ZADEN_VAR_UNARY_MAGIC):
             original = self.decompress_block_optimized(data)
             if original is not None:
                 with open(outfile, 'wb') as f:
@@ -2840,21 +2912,20 @@ class PJPCompressor:
         if len(data) == 0:
             return None
         magic = data[0]
+        pos = 1
         if magic == self.ZADEN_MAGIC:
             # Original 2‑pass format
-            pos = 1
             if len(data) < pos + 8:
                 return None
             block_size, num_blocks = struct.unpack('<II', data[pos:pos+8])
             pos += 8
-            # Decode two keys per block
             keys_per_block = []
             for _ in range(num_blocks):
                 k1, pos = self._decode_key_unary(data, pos)
                 k2, pos = self._decode_key_unary(data, pos)
                 keys_per_block.append([k1, k2])
         elif magic == self.ZADEN_VAR_MAGIC:
-            pos = 1
+            # variable passes (≤ 255) with byte count
             if len(data) < pos + 8:
                 return None
             block_size, num_blocks = struct.unpack('<II', data[pos:pos+8])
@@ -2865,6 +2936,20 @@ class PJPCompressor:
                     return None
                 num_passes = data[pos]
                 pos += 1
+                keys = []
+                for _ in range(num_passes):
+                    k, pos = self._decode_key_unary(data, pos)
+                    keys.append(k)
+                keys_per_block.append(keys)
+        elif magic == self.ZADEN_VAR_UNARY_MAGIC:
+            # variable passes with unary count
+            if len(data) < pos + 8:
+                return None
+            block_size, num_blocks = struct.unpack('<II', data[pos:pos+8])
+            pos += 8
+            keys_per_block = []
+            for _ in range(num_blocks):
+                num_passes, pos = self._decode_unary_count(data, pos)
                 keys = []
                 for _ in range(num_passes):
                     k, pos = self._decode_key_unary(data, pos)
@@ -2886,7 +2971,6 @@ class PJPCompressor:
         for keys in keys_per_block:
             block = inner_data[offset:offset+block_size]
             current = block
-            # Apply reverse passes in reverse order
             for key in reversed(keys):
                 pad_len = (3 - len(current) % 3) % 3
                 if pad_len:
@@ -3192,8 +3276,8 @@ class PJPCompressor:
         else:
             print("  PASS: Zaden round‑trip OK")
 
-        print("\nTesting Zaden variable‑pass (0,1,3) round‑trip...")
-        for passes in [0, 1, 3]:
+        print("\nTesting Zaden variable‑pass (0,1,3,300) round‑trip...")
+        for passes in [0, 1, 3, 300]:
             if not self._test_zaden_var_roundtrip(test_zaden_data, passes):
                 print(f"  FAIL: Zaden variable‑pass ({passes}) round‑trip mismatch")
                 all_ok = False
@@ -3312,7 +3396,7 @@ class PJPCompressor:
             all_ok = False
         else:
             print("  PASS: Zaden 2‑pass extraction OK")
-        for passes in [0, 1, 3]:
+        for passes in [0, 1, 3, 300]:
             if not self._test_zaden_var_roundtrip(zaden_sample, passes):
                 print(f"  FAIL: Zaden var pass ({passes}) extraction mismatch")
                 all_ok = False
@@ -3348,18 +3432,21 @@ def get_menu_choice():
         except ValueError:
             print("Invalid input. Please enter a number (0-9).")
 
-def get_positive_int(prompt: str, default: int, min_val: int = 1, max_val: int = 300):
-    """Get an integer within [min_val, max_val]."""
+def get_positive_int(prompt: str, default: int, min_val: int = 1, max_val: int = None):
+    """Get an integer within [min_val, max_val] (if max_val specified)."""
     while True:
         try:
             val = input(prompt).strip()
             if val == "":
                 return default
             num = int(val)
-            if min_val <= num <= max_val:
+            if min_val <= num and (max_val is None or num <= max_val):
                 return num
             else:
-                print(f"Please enter a number between {min_val} and {max_val}.")
+                if max_val is None:
+                    print(f"Please enter a number at least {min_val}.")
+                else:
+                    print(f"Please enter a number between {min_val} and {max_val}.")
         except ValueError:
             print("Invalid input. Please enter a number.")
 
@@ -3367,8 +3454,8 @@ def main():
     print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30 + .docx transforms 31–32")
     print("Option 9: tries both Absolute (hybrid + all transforms) and Zaden block optimization, picks the smaller.")
     print("         Time limit per block can be set from 1 to 300 seconds.")
-    print("         Zaden files use a single‑byte header: 0x33 (original) or 0x34 (variable passes).")
-    print("         Now also tests a range of passes (0..max) for Zaden to find the best.")
+    print("         Zaden files use magic 0x33 (original 2-pass), 0x34 (≤255 passes), 0x35 (any passes).")
+    print("         Now you can test up to 2^8192 passes (input accepts huge integers).")
     print("Dictionary entries are read as plain text or Base64‑encoded UTF‑8.")
     if paq is None and not HAS_ZSTD:
         print("Warning: No compression backend found. Dictionary streams will be stored raw.")
@@ -3436,7 +3523,7 @@ def main():
             bs = get_positive_int("Block size (bytes, default 256): ", 256, 1, 65536)
             qb = input("Use quantum‑boosted search? (y/n): ").strip().lower() == 'y'
             tlim = get_positive_int("Time limit per block (seconds, default 60, 1-300): ", 60, 1, 300)
-            max_p = get_positive_int("Maximum number of Zaden passes to test (0-255, default 2): ", 2, 0, 255)
+            max_p = get_positive_int("Maximum number of Zaden passes to test (0..2^8192, default 2): ", 2, 0)
             c.compress_with_best_plus_block(i, o, block_size=bs, quantum_boost=qb, time_limit_per_block=float(tlim), max_passes=max_p)
 
         # After any operation (except exit), pause
