@@ -1,5 +1,3 @@
-Is it 33, 34, 35 passes 8192 35 zsden option 9 only #!/usr/bin/env python3
-
 # -*- coding: utf-8 -*-
 
 “””
