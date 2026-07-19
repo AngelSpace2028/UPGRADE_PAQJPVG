@@ -2214,7 +2214,9 @@ class PJPCompressor:
                                                include_28=include_28, include_29=include_29,
                                                include_30=include_30)
             else:
-                raise RuntimeError("Safe compression failed – unexpected internal error!")
+                # Provide more detail for debugging
+                raise RuntimeError(f"Safe compression failed – unexpected internal error! "
+                                   f"(input len={len(data)}, output len={len(best_bytes)})")
         return best_bytes
 
     def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:
@@ -3317,10 +3319,8 @@ def main():
         elif choice == 9:
             i = input("Input file: ").strip()
             o = input("Output file: ").strip() or i + ".pjp"
-            bs = get_positive_int("Block size (bytes, default 256): ", 256, 1, 65536)
-            qb = input("Use quantum‑boosted search? (y/n): ").strip().lower() == 'y'
-            tlim = get_positive_int("Time limit per block (seconds, default 60, 1-300): ", 60, 1, 300)
-            c.compress_with_best_plus_block(i, o, block_size=bs, quantum_boost=qb, time_limit_per_block=float(tlim))
+            # Always use block_size=256, quantum_boost=False, time_limit=300 seconds
+            c.compress_with_best_plus_block(i, o, block_size=256, quantum_boost=False, time_limit_per_block=300.0)
 
         # After any operation (except exit), pause
         if choice != 0:
