@@ -2005,6 +2005,7 @@ class PJPCompressor:
                 break
         while len(safe) < 52:
             safe.append(256)
+        self.safe_base = safe   # store for later use in encoding
         base = safe
         return [(t1, t2) for t1 in base for t2 in base]
 
@@ -2089,18 +2090,26 @@ class PJPCompressor:
         return None
 
     # ------------------------------------------------------------------
-    # Variable‑length header encoding / decoding
+    # Variable‑length header encoding / decoding (CORRECTED)
     # ------------------------------------------------------------------
     def _encode_marker_single(self, t: int) -> bytes:
         if t <= 252:
             return bytes([t - 1])
+        # t >= 253: use 254 + (t-253), works up to t=508
         return bytes([254, t - 253])
 
     def _encode_marker_raw(self) -> bytes:
         return bytes([252])
 
     def _encode_marker_pair(self, t1: int, t2: int) -> bytes:
-        idx = (t1 - 1) * 52 + (t2 - 1)
+        # Use the correct index in the base list
+        try:
+            i1 = self.safe_base.index(t1)
+            i2 = self.safe_base.index(t2)
+        except ValueError:
+            # fallback: should never happen if t1,t2 are from pair list
+            return bytes([252])   # treat as raw
+        idx = i1 * 52 + i2
         return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
 
     def _decode_header(self, data: bytes):
@@ -2123,9 +2132,9 @@ class PJPCompressor:
             if len(data) < 2:
                 return 0, ()
             x = data[1]
-            if x > 3:
-                return 0, ()
-            return 2, (253 + x,)
+            # removed the x > 3 restriction – now any x up to 255 is allowed
+            t = 253 + x
+            return 2, (t,)
         else:
             return 0, ()
 
