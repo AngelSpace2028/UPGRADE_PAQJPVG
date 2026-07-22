@@ -256,6 +256,8 @@ class PJPCompressor:
         self._build_transform_maps()
         self.sequences = self._build_pair_sequences()
         self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}
+        # FIX: Precompute reverse mapping from (t1,t2) -> index for correct header encoding
+        self.pair_to_idx = {pair: idx for idx, pair in self.pair_lookup.items()}
 
         self.static_dict, self.word_to_index = self._load_static_dictionary()
         self.line_dict, self.line_to_index = self._load_line_dictionary()
@@ -1937,7 +1939,7 @@ class PJPCompressor:
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
 
-        # 256 no-op
+        # 256 no‑op
         self.fwd_transforms[256] = self.transform_256
         self.rev_transforms[256] = self.reverse_transform_256
 
@@ -2044,7 +2046,7 @@ class PJPCompressor:
         return None
 
     # ------------------------------------------------------------------
-    # Variable‑length header encoding / decoding
+    # Variable‑length header encoding / decoding (FIXED: use pair index mapping)
     # ------------------------------------------------------------------
     def _encode_marker_single(self, t: int) -> bytes:
         if t <= 252:
@@ -2055,7 +2057,8 @@ class PJPCompressor:
         return bytes([252])
 
     def _encode_marker_pair(self, t1: int, t2: int) -> bytes:
-        idx = (t1 - 1) * 52 + (t2 - 1)
+        # Use the precomputed index from the safe pair list
+        idx = self.pair_to_idx[(t1, t2)]
         return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
 
     def _decode_header(self, data: bytes):
@@ -2781,7 +2784,7 @@ class PJPCompressor:
         return all_ok
 
     # ------------------------------------------------------------------
-    # Transform 256 – no-op
+    # Transform 256 – no‑op
     # ------------------------------------------------------------------
     def transform_256(self, d: bytes) -> bytes:
         return d
