@@ -43,6 +43,8 @@ except ImportError:
 USE_QUANTUM = False
 HAS_QISKIT = False
 HAS_ZSTD = False
+zstd_cctx = None
+zstd_dctx = None
 
 def install_package(pkg: str) -> bool:
     """Install a package non‑interactively."""
@@ -53,11 +55,16 @@ def install_package(pkg: str) -> bool:
             '--no-input', '--disable-pip-version-check', pkg
         ])
         return True
-    except Exception:
+    except Exception as e:
+        print(f"  Install of {pkg} failed: {e}")
         return False
 
 # ---------- Prompt 1: Quantum ----------
-quantum_choice = input("Option 1: Enable quantum‑inspired transforms (requires Qiskit)? (y/n) [default n]: ").strip().lower()
+try:
+    quantum_choice = input("Option 1: Enable quantum‑inspired transforms (requires Qiskit)? (y/n) [default n]: ").strip().lower()
+except EOFError:
+    quantum_choice = 'n'
+
 if quantum_choice == 'y':
     try:
         from qiskit import QuantumCircuit
@@ -79,7 +86,11 @@ else:
     print("Quantum transforms disabled.")
 
 # ---------- Prompt 2: Four optional backends (RESTORED) ----------
-other_choice = input("Option 2: Install 4 optional backends (mpmath, cython, paq, python-docx)? (y/n) [default n]: ").strip().lower()
+try:
+    other_choice = input("Option 2: Install 4 optional backends (mpmath, cython, paq, python-docx)? (y/n) [default n]: ").strip().lower()
+except EOFError:
+    other_choice = 'n'
+
 if other_choice == 'y':
     for pkg in ['mpmath', 'cython', 'paq', 'python-docx']:
         try:
@@ -90,13 +101,18 @@ if other_choice == 'y':
 else:
     print("Skipping 4 optional backends.")
 
-# ---------- Prompt 3: Zstandard (MANDATORY - RESTORED) ----------
-zstd_choice = input("Option 3: Install zstandard backend? (mandatory, y/n) [default y]: ").strip().lower()
+# ---------- Prompt 3: Zstandard (NOW OPTIONAL) ----------
+try:
+    zstd_choice = input("Option 3: Install zstandard backend? (optional, y/n) [default y]: ").strip().lower()
+except EOFError:
+    zstd_choice = 'y'
+
 if zstd_choice == 'n':
-    print("ERROR: zstandard is mandatory for this tool. Exiting.")
-    sys.exit(1)
+    print("Skipping zstandard backend. Compression will use raw/paq/LZH fallback.")
+    HAS_ZSTD = False
 else:
-    # Ensure zstandard is installed and imported
+    # Try to import zstandard; if unavailable, try to install it; if install fails,
+    # just continue WITHOUT zstandard (no exit).
     try:
         import zstandard as zstd
         zstd_cctx = zstd.ZstdCompressor(level=22)
@@ -112,11 +128,11 @@ else:
                 HAS_ZSTD = True
                 print("zstandard installed successfully.")
             except ImportError:
-                print("CRITICAL ERROR: Failed to import zstandard after automatic installation.")
-                sys.exit(1)
+                print("WARNING: zstandard import still failing after install. Continuing without zstandard.")
+                HAS_ZSTD = False
         else:
-            print("CRITICAL ERROR: Failed to install zstandard. Please install it manually (`pip install zstandard`) and restart.")
-            sys.exit(1)
+            print("WARNING: Could not install zstandard. Continuing WITHOUT it (raw/paq/LZH fallback).")
+            HAS_ZSTD = False
 
 PROGNAME = "UnifiedPAQJP+PJP (Single Transforms)"
 
@@ -1770,14 +1786,14 @@ class UnifiedCompressor:
     # ------------------------------------------------------------------
     def _compress_backend_with_flag(self, data: bytes) -> bytes:
         candidates = []
-        if HAS_ZSTD:
+        if HAS_ZSTD and zstd_cctx is not None:
             try:
                 z = zstd_cctx.compress(data)
                 # strip 4‑byte magic 28 B5 2F FD
                 if z.startswith(b'\x28\xb5\x2f\xfd'):
                     z = z[4:]
                 candidates.append((1, z))
-            except:
+            except Exception:
                 pass
         if paq is not None:
             try:
@@ -1786,7 +1802,7 @@ class UnifiedCompressor:
                 if p.startswith(b'\x00\x63\x00\x00'):
                     p = p[4:]
                 candidates.append((2, p))
-            except:
+            except Exception:
                 pass
         candidates.append((0, data))
         best_flag, best_data = min(candidates, key=lambda x: len(x[1]))
@@ -1799,7 +1815,7 @@ class UnifiedCompressor:
         payload = data[1:]
         if flag == 0:
             return payload
-        elif flag == 1 and HAS_ZSTD:
+        elif flag == 1 and HAS_ZSTD and zstd_dctx is not None:
             # re‑add zstd magic
             full = b'\x28\xb5\x2f\xfd' + payload
             return zstd_dctx.decompress(full)
@@ -3081,12 +3097,16 @@ def main():
     print("=" * 58)
 
     while True:
-        print("\nMenu:")
-        print("1) Compress (Fast)")
-        print("2) Decompress")
-        print("3) Full self‑test (257 transforms)")
-        print("0) Exit")
-        choice = input("> ").strip()
+        try:
+            print("\nMenu:")
+            print("1) Compress (Fast)")
+            print("2) Decompress")
+            print("3) Full self‑test (257 transforms)")
+            print("0) Exit")
+            choice = input("> ").strip()
+        except EOFError:
+            break
+
         if choice == "1":
             infile = input("Input file: ").strip()
             c.compress_file(infile, use_lzh=False)
