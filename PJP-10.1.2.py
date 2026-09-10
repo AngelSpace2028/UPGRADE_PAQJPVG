@@ -8,7 +8,7 @@ Unified PAQJP+PJP – Simplified (Lossless, 256 transforms only)
 - Final verification + fallback to raw+backend
 - Quantum‑inspired transforms (optional)
 - Exhaustive self‑test for 256 transforms
-- Output naming: input.txt.pjp (or .pjp.lzh)
+- Output naming: input.txt.pjp2 (or .pjp2.lzh)
 - ALL 256 base transforms are individually lossless for every input.
 - Composition of lossless transforms is lossless (not used here).
 """
@@ -2947,7 +2947,7 @@ class UnifiedCompressor:
     # ------------------------------------------------------------------
     # File I/O
     # ------------------------------------------------------------------
-    def _auto_output_name(self, infile: str, suffix: str = ".pjp") -> str:
+    def _auto_output_name(self, infile: str, suffix: str = ".pjp2") -> str:
         base = os.path.basename(infile)
         return f"{base}{suffix}"
 
@@ -2971,10 +2971,10 @@ class UnifiedCompressor:
         try:
             if use_lzh:
                 compressed = self.compress_with_lzh(data, time_limit=time_limit)
-                default_suffix = ".pjp.lzh"
+                default_suffix = ".pjp2.lzh"
             else:
                 compressed = self.compress_with_verification(data, time_limit=time_limit)
-                default_suffix = ".pjp"
+                default_suffix = ".pjp2"
         except RuntimeError as e:
             print(f"Compression failed: {e}"); return
         if not outfile:
@@ -3031,7 +3031,7 @@ class UnifiedCompressor:
 
         if not outfile:
             base = os.path.basename(infile)
-            name_without_suffix = re.sub(r'\.pjp(\.lzh)?$', '', base)
+            name_without_suffix = re.sub(r'\.pjp2(\.lzh)?$', '', base)
             outfile = name_without_suffix
 
         try:
@@ -3107,7 +3107,7 @@ class UnifiedCompressor:
 # ------------------------------------------------------------
 def main():
     print(f"{PROGNAME} – Unified compression with 256 single transforms")
-    print("Compressed output: input.txt.pjp (or input.txt.pjp.lzh)")
+    print("Compressed output: input.txt.pjp2 (or input.txt.pjp2.lzh)")
     print("Lossless output guaranteed via per-input verification and raw fallback.\n")
     c = UnifiedCompressor()
 
@@ -3131,11 +3131,11 @@ def main():
             c.compress_file(infile, use_lzh=False)
         elif choice == "2":
             while True:
-                infile = input("Compressed file (.pjp or .pjp.lzh) [press Enter to cancel]: ").strip()
+                infile = input("Compressed file (.pjp2 or .pjp2.lzh) [press Enter to cancel]: ").strip()
                 if not infile:
                     break
-                if not (infile.lower().endswith('.pjp') or infile.lower().endswith('.pjp.lzh')):
-                    print("Error: Incorrect format. Only .pjp and .pjp.lzh files are supported.")
+                if not (infile.lower().endswith('.pjp2') or infile.lower().endswith('.pjp2.lzh')):
+                    print("Error: Incorrect format. Only .pjp2 and .pjp2.lzh files are supported.")
                     continue
                 outfile = input("Output file (leave blank to restore original name): ").strip()
                 if c.decompress_file(infile, outfile):
