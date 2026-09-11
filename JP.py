@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Unified PAQJP+PJP – Algorithm 58 with repeats 1..256
-=====================================================
-- 256 transforms (single, no pairs)
-- Per-input verification + raw fallback (100% lossless)
-- Algorithm 58 (UPGRADED): per-block iterated bit-RLE, up to 256 passes,
-  self-terminating via a 2-byte bit-count header, early stop on no gain.
-- Algorithm 59: byte-level delta
-- Algorithm 60: byte-RLE with adaptive escape byte
-- Backend: try zstd / paq / raw, pick smallest; NO flag byte.
-- Robust zstandard install.
-- Output naming: input.txt.jp (or .jp.lzh)
+Unified PAQJP+PJP – Algorithm 58 with 5-bit substitution + 1101 escape
+======================================================================
+Algorithm 58 prefix table (value bit first, symmetric for 0/1):
+    v 0               -> run of 1
+    v 10              -> run of 2
+    v 110             -> run of 3
+    v 1101 + 8 bits   -> run of 4..259
+5-bit substitution prepass (bijective 3-cycle):
+    11010 -> 00100 -> 01010 -> 11010
+    11011 -> 00101 -> 01011 -> 11011
+Output: input.txt.jp (or .jp.lzh)
 """
 
 import math, random, decimal, hashlib, base64, heapq, struct, os, tempfile
@@ -27,28 +27,26 @@ except ImportError:
 USE_QUANTUM = False
 HAS_QISKIT = False
 HAS_ZSTD = False
-
-# ------------------------------------------------------------------
-# Robust package installation
-# ------------------------------------------------------------------
 LOCAL_LIBS_DIR = os.path.join(os.path.expanduser("~"), ".compress_local_libs")
+
 
 def _add_to_sys_path(d):
     if d and os.path.isdir(d) and d not in sys.path:
         sys.path.insert(0, d)
 
+
 def _preload_existing_paths():
     for fn in (lambda: site.getusersitepackages(),
                lambda: site.getuserbase() + '/lib/python' +
-                       f"{sys.version_info.major}.{sys.version_info.minor}" +
-                       '/site-packages',
+                       f"{sys.version_info.major}.{sys.version_info.minor}" + '/site-packages',
                lambda: sysconfig.get_paths().get('purelib'),
                lambda: sysconfig.get_paths().get('platlib'),
                lambda: LOCAL_LIBS_DIR):
         try: _add_to_sys_path(fn())
         except Exception: pass
 
-def install_package(pkg: str) -> bool:
+
+def install_package(pkg):
     os.makedirs(LOCAL_LIBS_DIR, exist_ok=True)
     strategies = [
         [sys.executable, '-m', 'pip', 'install', '--no-input',
@@ -65,8 +63,7 @@ def install_package(pkg: str) -> bool:
         try:
             subprocess.check_call(cmd, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL)
-            _preload_existing_paths()
-            _add_to_sys_path(LOCAL_LIBS_DIR)
+            _preload_existing_paths(); _add_to_sys_path(LOCAL_LIBS_DIR)
             return True
         except Exception:
             continue
@@ -76,28 +73,29 @@ def install_package(pkg: str) -> bool:
         try:
             subprocess.check_call(apt_cmd, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL)
-            _preload_existing_paths()
-            return True
+            _preload_existing_paths(); return True
         except Exception:
             continue
     return False
+
 
 def _clear_module_cache(prefix):
     for m in list(sys.modules.keys()):
         if m == prefix or m.startswith(prefix + '.'):
             del sys.modules[m]
 
+
 def try_import_zstd():
     _clear_module_cache('zstandard')
-    _preload_existing_paths()
-    _add_to_sys_path(LOCAL_LIBS_DIR)
+    _preload_existing_paths(); _add_to_sys_path(LOCAL_LIBS_DIR)
     try:
         import zstandard as zstd
         return zstd, zstd.ZstdCompressor(level=22), zstd.ZstdDecompressor()
     except ImportError:
         return None, None, None
 
-# ---------- Prompt 1 ----------
+
+# ---------------- Prompts ----------------
 qc_choice = input("Option 1: Enable quantum-inspired transforms (Qiskit)? (y/n) [n]: ").strip().lower()
 if qc_choice == 'y':
     try:
@@ -111,52 +109,39 @@ if qc_choice == 'y':
                 from qiskit import QuantumCircuit
                 HAS_QISKIT = True; USE_QUANTUM = True
                 print("Quantum ENABLED.")
-            except ImportError:
-                print("Qiskit install succeeded but import failed. Disabled.")
-        else:
-            print("Qiskit install failed. Disabled.")
-else:
-    print("Quantum disabled.")
+            except ImportError: print("Qiskit install succeeded but import failed. Disabled.")
+        else: print("Qiskit install failed. Disabled.")
+else: print("Quantum disabled.")
 
-# ---------- Prompt 2 ----------
 oc = input("Option 2: Install 4 optional backends (mpmath, cython, paq, python-docx)? (y/n) [n]: ").strip().lower()
 if oc == 'y':
     for pkg in ['mpmath', 'cython', 'paq', 'python-docx']:
-        try:
-            importlib.import_module(pkg); print(f"{pkg} already installed.")
-        except ImportError:
-            install_package(pkg)
-else:
-    print("Skipping 4 optional backends.")
+        try: importlib.import_module(pkg); print(f"{pkg} already installed.")
+        except ImportError: install_package(pkg)
+else: print("Skipping 4 optional backends.")
 
-# ---------- Prompt 3 ----------
 print("Option 3: zstandard backend (strongly recommended)")
 zc = input("  Install zstandard now? (y/n) [y]: ").strip().lower() or 'y'
 if zc == 'n':
-    print("WARNING: zstandard will NOT be used. Backend falls back to paq-only or raw.")
-    HAS_ZSTD = False
+    print("WARNING: zstandard will NOT be used."); HAS_ZSTD = False
 else:
     zstd, zstd_cctx, zstd_dctx = try_import_zstd()
     if zstd is not None:
-        HAS_ZSTD = True
-        print("zstandard already installed and loaded.")
+        HAS_ZSTD = True; print("zstandard already installed and loaded.")
     else:
         print("zstandard not found. Attempting installation...")
         if install_package('zstandard'):
             zstd, zstd_cctx, zstd_dctx = try_import_zstd()
             if zstd is not None:
-                HAS_ZSTD = True
-                print("zstandard installed and loaded successfully.")
+                HAS_ZSTD = True; print("zstandard installed and loaded successfully.")
             else:
                 print("Install reported success but import still fails.")
-                print("Continuing WITHOUT zstandard.")
-                HAS_ZSTD = False
+                print("Continuing WITHOUT zstandard."); HAS_ZSTD = False
         else:
             print("All zstandard install attempts failed.")
-            print("Continuing WITHOUT zstandard.")
-            HAS_ZSTD = False
+            print("Continuing WITHOUT zstandard."); HAS_ZSTD = False
 
-PROGNAME = "UnifiedPAQJP+PJP (Algorithm 58 repeats 1-256, .jp output)"
+PROGNAME = "UnifiedPAQJP+PJP (Algorithm 58: 5-bit subst + 1101 escape)"
 
 DICT_DIR = "Dictionaries"
 COMBINED_DICTIONARY_FILE = os.path.join(DICT_DIR, "dictionary_combined.txt")
@@ -183,6 +168,7 @@ DICTIONARY_URLS = [
 ]
 MAX_LINE_ENTRIES = 1024
 
+
 def download_and_merge_dictionaries():
     if not os.path.exists(DICT_DIR): os.makedirs(DICT_DIR)
     if os.path.exists(COMBINED_DICTIONARY_FILE):
@@ -193,8 +179,10 @@ def download_and_merge_dictionaries():
         print(f"Downloading {filename}...")
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response: content = response.read()
-            if b'<html' in content[:200].lower(): print("  HTML page. Skipping."); continue
+            with urllib.request.urlopen(req) as response:
+                content = response.read()
+            if b'<html' in content[:200].lower():
+                print("  HTML page. Skipping."); continue
             with open(local_path, 'wb') as f: f.write(content)
             with open(local_path, 'r', encoding='utf-8', errors='ignore') as f:
                 for line in f:
@@ -212,12 +200,15 @@ def download_and_merge_dictionaries():
         with open(COMBINED_DICTIONARY_FILE, 'w', encoding='utf-8') as f:
             for word in sorted(all_words): f.write(word + '\n')
         print(f"Merged {len(all_words)} words."); return True
-    except Exception as e: print(f"Write failed: {e}"); return False
+    except Exception as e:
+        print(f"Write failed: {e}"); return False
+
 
 PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))]
 PI_DIGITS = [79, 17, 111]
 
-def find_nearest_prime_around(n: int) -> int:
+
+def find_nearest_prime_around(n):
     if n < 2: return 2
     o = 0
     while True:
@@ -225,6 +216,7 @@ def find_nearest_prime_around(n: int) -> int:
         if c1 >= 2 and all(c1 % d != 0 for d in range(2, int(c1 ** 0.5) + 1)): return c1
         if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2 ** 0.5) + 1)): return c2
         o += 1
+
 
 _CONST_DIAPASON_ITER_CODE = [
     (2, 0b10), (2, 0b11), (3, 0b010), (3, 0b011),
@@ -259,10 +251,12 @@ PAQ_STATE_TABLE = [
     [251,252,10,5],[253,254,8,6],[255,255,6,7],
 ]
 
+
 class TransformError(Exception): pass
 class DecompressionError(Exception): pass
 
-def mod_inv(a: int, m: int) -> Optional[int]:
+
+def mod_inv(a, m):
     if a == 0: return None
     m0 = m; y = 0; x = 1
     if m == 1: return 0
@@ -271,6 +265,7 @@ def mod_inv(a: int, m: int) -> Optional[int]:
         t = y; y = x - q * y; x = t
     if x < 0: x += m0
     return x
+
 
 class UnifiedCompressor:
     ULTRA_TIME_LIMIT = 300
@@ -293,27 +288,31 @@ class UnifiedCompressor:
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
 
-    def set_quantum_qubits(self, q: int):
+    def set_quantum_qubits(self, q):
         if not USE_QUANTUM or not HAS_QISKIT: print("Quantum disabled."); return
         if q < 1 or q > 49: print("Qubits 1..49."); return
-        self.QUANTUM_QUBITS = q; self.quantum_transforms_built = False
+        self.QUANTUM_QUBITS = q
+        self.quantum_transforms_built = False
         self._precompute_quantum_transforms()
 
-    def get_quantum_variation_count(self) -> int:
+    def get_quantum_variation_count(self):
         return (1 << self.QUANTUM_QUBITS) if (USE_QUANTUM and HAS_QISKIT) else 0
 
     def _build_mask_46(self):
-        base = [1,2,4,8,16,32,64,128,3,6]
+        base = [1, 2, 4, 8, 16, 32, 64, 128, 3, 6]
         self.mask_46 = [(b - 10) & 0xFF for b in base] * 10
 
     def get_pi_digits(self, n): return self.PI_STR[2:2+n] if n >= 1 else ""
+
     def find_lossless_k(self, n):
         if n < 1: return 0, True
-        ts = int(self.PI_STR.replace('.','')[:n+1]); DF = 16777216
-        decimal.getcontext().prec = 50; pi_dec = decimal.Decimal(self.PI_STR)
+        ts = int(self.PI_STR.replace('.', '')[:n+1]); DF = 16777216
+        decimal.getcontext().prec = 50
+        pi_dec = decimal.Decimal(self.PI_STR)
         k = int(round((pi_dec - 3) * DF)); k = max(0, min(k, DF - 1))
-        ap = (3 * 10**n * DF + k * 10**n) // DF
+        ap = (3 * 10 ** n * DF + k * 10 ** n) // DF
         return k, ap == ts
+
     def to_bin(self, v, b): return format(v, 'b').zfill(b)
     def get_bit_size(self, k): return 23 if k <= 0x7FFFFF else 25
 
@@ -333,27 +332,33 @@ class UnifiedCompressor:
     def get_basel_digits(self, n):
         decimal.getcontext().prec = n + 5
         pi = decimal.Decimal(self.PI_STR)
-        return str((pi*pi)/decimal.Decimal(6)).replace('.','')[:n]
+        return str((pi*pi)/decimal.Decimal(6)).replace('.', '')[:n]
+
     def get_one_over_e_digits(self, n):
         decimal.getcontext().prec = n + 5
         e = decimal.Decimal(1).exp()
-        return str(decimal.Decimal(1)/e).replace('.','')[:n]
+        return str(decimal.Decimal(1)/e).replace('.', '')[:n]
+
     def get_5e_digits(self, n):
         decimal.getcontext().prec = n + 5
         e = decimal.Decimal(1).exp()
-        return str(decimal.Decimal(5)*e).replace('.','')[:n]
+        return str(decimal.Decimal(5)*e).replace('.', '')[:n]
 
     def _gen_seed_tables(self, num=126, size=40, seed=42):
         random.seed(seed)
         return [[random.randint(5, 255) for _ in range(size)] for _ in range(num)]
+
     def _gen_fib(self, n):
         a, b = 0, 1; res = [a, b]
         for _ in range(2, n): a, b = b, a+b; res.append(b)
         return res
-    def get_seed(self, i, v): return self.seed_tables[i][v % 40] if 0 <= i < len(self.seed_tables) else 0
+
+    def get_seed(self, i, v):
+        return self.seed_tables[i][v % 40] if 0 <= i < len(self.seed_tables) else 0
 
     def _append_bits(self, bl, v, c):
         for i in range(c-1, -1, -1): bl.append((v >> i) & 1)
+
     def _read_bits(self, bits, pos, c):
         v = 0
         for i in range(c):
@@ -361,6 +366,7 @@ class UnifiedCompressor:
             v = (v << 1) | bits[pos + i]
         return v
 
+    # ================= transform_00 =================
     def transform_00(self, data):
         if not data: return struct.pack('>I', 0)
         best_r = None; best_l = float('inf'); best_s = []
@@ -389,22 +395,30 @@ class UnifiedCompressor:
         if best_r is None or best_l >= len(data):
             return struct.pack('>I', len(data)) + bytes([0]) + data
         h = bytearray(); h.extend(struct.pack('>I', len(data)))
-        h.append(len(best_s)); h.extend(best_s); return h + best_r
+        h.append(len(best_s)); h.extend(best_s)
+        return h + best_r
 
     def _apply_rle_to_shifted(self, sd, sh):
-        bits = []; self._append_bits(bits, 0b010, 3); self._append_bits(bits, sh, 8)
+        bits = []
+        self._append_bits(bits, 0b010, 3); self._append_bits(bits, sh, 8)
         i = 0; n = len(sd)
         while i < n:
             v = sd[i]; r = 1; i += 1
             while i < n and sd[i] == v: r += 1; i += 1
             while r >= 13:
                 ch = min(r, 268)
-                self._append_bits(bits, 0b1111, 4); self._append_bits(bits, ch-13, 8); self._append_bits(bits, v, 8)
+                self._append_bits(bits, 0b1111, 4)
+                self._append_bits(bits, ch-13, 8)
+                self._append_bits(bits, v, 8)
                 r -= ch
-            if r == 1: self._append_bits(bits, 0b00, 2); self._append_bits(bits, v, 8)
-            elif r <= 5: self._append_bits(bits, 0b01, 2); self._append_bits(bits, r-2, 2); self._append_bits(bits, v, 8)
-            elif r <= 12: self._append_bits(bits, 0b10, 2); self._append_bits(bits, r-6, 3); self._append_bits(bits, v, 8)
-        pad = (8 - len(bits) % 8) % 8; self._append_bits(bits, 0, pad)
+            if r == 1:
+                self._append_bits(bits, 0b00, 2); self._append_bits(bits, v, 8)
+            elif r <= 5:
+                self._append_bits(bits, 0b01, 2); self._append_bits(bits, r-2, 2); self._append_bits(bits, v, 8)
+            elif r <= 12:
+                self._append_bits(bits, 0b10, 2); self._append_bits(bits, r-6, 3); self._append_bits(bits, v, 8)
+        pad = (8 - len(bits) % 8) % 8
+        self._append_bits(bits, 0, pad)
         out = bytearray()
         for j in range(0, len(bits), 8):
             byte = 0
@@ -433,7 +447,7 @@ class UnifiedCompressor:
         if not data: return None
         bits = []
         for b in data:
-            for i in range(7,-1,-1): bits.append((b >> i) & 1)
+            for i in range(7, -1, -1): bits.append((b >> i) & 1)
         pos = 0; nb = len(bits)
         if nb < 11: return None
         m = self._read_bits(bits, pos, 3); pos += 3
@@ -460,6 +474,7 @@ class UnifiedCompressor:
             if bits[i] != 0: return None
         return out
 
+    # ================= 01..21 =================
     def transform_01(self, d):
         t = bytearray(d); r = self.repeat_count
         for p in PRIMES:
@@ -469,6 +484,7 @@ class UnifiedCompressor:
                     if i < len(t): t[i] ^= xv
         return bytes(t)
     reverse_transform_01 = transform_01
+
     def transform_02(self, d):
         if not d: return b'\x00'
         t = bytearray(d); cs = sum(d) % 256
@@ -483,6 +499,7 @@ class UnifiedCompressor:
         for i in range(1, len(t), 4):
             if i < len(t): t[i] ^= pv[i % len(pv)]
         return bytes(t)
+
     def transform_03(self, d):
         if not d: return b'\x00'
         t = bytearray(d); rot = (len(d)*13 + sum(d)) % 8 or 1
@@ -496,6 +513,7 @@ class UnifiedCompressor:
         for i in range(2, len(t), 5):
             if i < len(t): t[i] = ((t[i] >> rot) | (t[i] << (8-rot))) & 0xFF
         return bytes(t)
+
     def transform_04(self, d):
         t = bytearray(d); r = self.repeat_count
         for _ in range(r):
@@ -506,6 +524,7 @@ class UnifiedCompressor:
         for _ in range(r):
             for i in range(len(t)): t[i] = (t[i] + (i % 256)) % 256
         return bytes(t)
+
     def transform_05(self, d, s=3):
         t = bytearray(d)
         for i in range(len(t)): t[i] = ((t[i] << s) | (t[i] >> (8-s))) & 0xFF
@@ -514,6 +533,7 @@ class UnifiedCompressor:
         t = bytearray(d)
         for i in range(len(t)): t[i] = ((t[i] >> s) | (t[i] << (8-s))) & 0xFF
         return bytes(t)
+
     def transform_06(self, d, sd=42):
         random.seed(sd); sub = list(range(256)); random.shuffle(sub)
         return bytes(sub[b] for b in d)
@@ -522,27 +542,33 @@ class UnifiedCompressor:
         inv = [0]*256
         for i in range(256): inv[sub[i]] = i
         return bytes(inv[b] for b in d)
+
     def transform_07(self, d):
         t = bytearray(d); r = self.repeat_count
-        sh = len(d) % len(self.PI_DIGITS); pr = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
+        sh = len(d) % len(self.PI_DIGITS)
+        pr = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
         sz = len(d) % 256
         for i in range(len(t)): t[i] ^= sz
         for _ in range(r):
             for i in range(len(t)): t[i] ^= pr[i % len(pr)]
         return bytes(t)
     reverse_transform_07 = transform_07
+
     def transform_08(self, d):
         t = bytearray(d); r = self.repeat_count
-        sh = len(d) % len(self.PI_DIGITS); pr = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
+        sh = len(d) % len(self.PI_DIGITS)
+        pr = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
         p = find_nearest_prime_around(len(d) % 256)
         for i in range(len(t)): t[i] ^= p
         for _ in range(r):
             for i in range(len(t)): t[i] ^= pr[i % len(pr)]
         return bytes(t)
     reverse_transform_08 = transform_08
+
     def transform_09(self, d):
         t = bytearray(d); r = self.repeat_count
-        sh = len(d) % len(self.PI_DIGITS); pr = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
+        sh = len(d) % len(self.PI_DIGITS)
+        pr = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
         p = find_nearest_prime_around(len(d) % 256)
         seed = self.get_seed(len(d) % len(self.seed_tables), len(d))
         for i in range(len(t)): t[i] ^= p ^ seed
@@ -550,6 +576,7 @@ class UnifiedCompressor:
             for i in range(len(t)): t[i] ^= pr[i % len(pr)] ^ (i % 256)
         return bytes(t)
     reverse_transform_09 = transform_09
+
     def transform_10(self, d):
         if not d: return b'\x00'
         cnt = sum(1 for i in range(len(d)-1) if d[i:i+2] == b'X1')
@@ -562,6 +589,7 @@ class UnifiedCompressor:
         n = d[0]; t = bytearray(d[1:])
         for i in range(len(t)): t[i] ^= n
         return bytes(t)
+
     def transform_11(self, d):
         if not d: return b''
         t = bytearray(d); L = len(t)
@@ -571,11 +599,13 @@ class UnifiedCompressor:
             t[i] ^= key
         return bytes(t)
     reverse_transform_11 = transform_11
+
     def transform_12(self, d):
         t = bytearray(d)
         for i in range(len(t)): t[i] ^= self.fibonacci[i % len(self.fibonacci)] % 256
         return bytes(t)
     reverse_transform_12 = transform_12
+
     def transform_13(self, d):
         if not d: return b'\x00'
         rp = self._calculate_repeats(d); cv = len(d) % 256; pv = []
@@ -592,12 +622,14 @@ class UnifiedCompressor:
         xv = pv[-1] if pv else 0
         for i in range(len(t)): t[i] ^= xv
         return bytes(t)
+
     def transform_14(self, d):
         if not d: return b'\x00'
         return d + bytes([sum(d) % 256])
     def reverse_transform_14(self, d):
         if not d: raise TransformError("T14")
         return d[:-1]
+
     def transform_15(self, d):
         if not d: return b'\x00'
         t = bytearray(d); pi_ = len(d) % 256; pv = self._get_pattern(3, pi_)
@@ -611,12 +643,14 @@ class UnifiedCompressor:
         for i in range(0, len(t), 3):
             if i < len(t): t[i] = (t[i] - pv[i % len(pv)]) % 256
         return bytes(t)
+
     def transform_16(self, d):
         if not d: return b''
         xb = (len(d) * 7 + 13) % 256; t = bytearray(d)
         for i in range(len(t)): t[i] ^= xb
         return bytes(t)
     reverse_transform_16 = transform_16
+
     def transform_18(self, d):
         if not d: return b''
         dg = self.get_basel_digits(max(10, len(d)//2 + 5))
@@ -625,6 +659,7 @@ class UnifiedCompressor:
         for i in range(len(t)): t[i] ^= mask[i % len(mask)]
         return bytes(t)
     reverse_transform_18 = transform_18
+
     def transform_19(self, d):
         if not d: return b''
         dg = self.get_one_over_e_digits(max(10, len(d)//2 + 5))
@@ -633,6 +668,7 @@ class UnifiedCompressor:
         for i in range(len(t)): t[i] ^= mask[i % len(mask)]
         return bytes(t)
     reverse_transform_19 = transform_19
+
     def transform_20(self, d):
         if not d: return b''
         dg = self.get_5e_digits(max(10, len(d)//2 + 5))
@@ -641,6 +677,7 @@ class UnifiedCompressor:
         for i in range(len(t)): t[i] ^= mask[i % len(mask)]
         return bytes(t)
     reverse_transform_20 = transform_20
+
     def transform_21(self, d):
         if not d: return b''
         t = bytearray(d)
@@ -652,10 +689,12 @@ class UnifiedCompressor:
         for i in range(len(t)): t[i] = (t[i] - 255) % 256
         return bytes(t)
 
+    # ================= 22..27 =================
     def transform_22(self, d): return base64.b64encode(d)
     def reverse_transform_22(self, d):
         try: return base64.b64decode(d, validate=False)
         except Exception as e: raise TransformError(f"B64: {e}")
+
     def transform_23(self, d):
         if not d: return b'\x00'
         try: text = d.decode('utf-8')
@@ -678,6 +717,7 @@ class UnifiedCompressor:
             if self.reverse_transform_23(toked) == d: return toked
         except Exception: pass
         return b'\x00' + d
+
     def reverse_transform_23(self, data):
         if not data: return b''
         flag = data[0]
@@ -708,8 +748,10 @@ class UnifiedCompressor:
                 else: raise TransformError("T23")
             return bytes(out)
         raise TransformError("T23 flag")
+
     def transform_24(self, d): return self.transform_23(d)
     def reverse_transform_24(self, d): return self.reverse_transform_23(d)
+
     def _split_text_into_chunks(self, text, level='all'):
         if level == 'paragraph': return re.split(r'(\n\n)', text)
         if level == 'line': return re.split(r'(\n)', text)
@@ -724,6 +766,7 @@ class UnifiedCompressor:
                     if k % 2 == 1: chunks.append(s); continue
                     chunks.extend(re.split(r'(\s+|\b)', s))
         return chunks
+
     def _dynamic_dict_tokenize(self, data, ib=3):
         try: text = data.decode('utf-8')
         except: return b'\x00' + data
@@ -744,6 +787,7 @@ class UnifiedCompressor:
             elif ib == 3: ts += struct.pack('>I', idx)[1:4]
             else: ts += struct.pack('>Q', idx)
         return bytes(h) + bytes(ts)
+
     def _dynamic_dict_detokenize(self, data):
         if not data: return b''
         if data[0] == 0: return data[1:]
@@ -773,8 +817,10 @@ class UnifiedCompressor:
             toks.append(dic[idx])
         try: return ''.join(toks).encode('utf-8')
         except Exception as e: raise TransformError(f"T25: {e}")
+
     def transform_25(self, d): return self._dynamic_dict_tokenize(d, 3)
     def reverse_transform_25(self, d): return self._dynamic_dict_detokenize(d)
+
     def transform_26(self, d):
         if not d: return b''
         secret = b"PJP_TRANSFORM26_SECRET"; out = bytearray()
@@ -785,6 +831,7 @@ class UnifiedCompressor:
             out.extend(a ^ b for a, b in zip(ch, mr))
         return bytes(out)
     def reverse_transform_26(self, d): return self.transform_26(d)
+
     def transform_27(self, d):
         try: text = d.decode('utf-8')
         except UnicodeDecodeError: return b'\x00' + d
@@ -793,7 +840,7 @@ class UnifiedCompressor:
         bits = []
         for ch in text:
             v = CHAR_TO_6BIT[ch]
-            for i in range(5,-1,-1): bits.append((v >> i) & 1)
+            for i in range(5, -1, -1): bits.append((v >> i) & 1)
         pad = (8 - len(bits) % 8) % 8; bits.extend([0]*pad)
         out = bytearray()
         for i in range(0, len(bits), 8):
@@ -801,6 +848,7 @@ class UnifiedCompressor:
             for j in range(8): b = (b << 1) | bits[i+j]
             out.append(b)
         return b'\x01' + struct.pack('<I', len(text)) + bytes(out)
+
     def reverse_transform_27(self, d):
         if len(d) < 1: raise TransformError("T27")
         f = d[0]
@@ -816,7 +864,7 @@ class UnifiedCompressor:
             if (pk[-1] & ((1 << pb) - 1)) != 0: raise TransformError("T27 pad")
         bits = []
         for b in pk:
-            for i in range(7,-1,-1): bits.append((b >> i) & 1)
+            for i in range(7, -1, -1): bits.append((b >> i) & 1)
         chars = []
         for i in range(nc):
             v = 0
@@ -824,6 +872,7 @@ class UnifiedCompressor:
             chars.append(SIXBIT_TO_CHAR[v])
         return ''.join(chars).encode('utf-8')
 
+    # ================= 28..30 =================
     def transform_28(self, d):
         if not d: return b'\x00'
         pl = (3 - len(d) % 3) % 3; pad = d + b'\x00' * pl
@@ -833,6 +882,7 @@ class UnifiedCompressor:
             key = ((i//3)*65537 + 12345) & 0xFFFF
             out.extend(((v - key) % (1 << 24)).to_bytes(3, 'little'))
         return bytes(out)
+
     def reverse_transform_28(self, d):
         if d == b'\x00': return b''
         if not d: raise TransformError("T28")
@@ -845,6 +895,7 @@ class UnifiedCompressor:
             out.extend(((v + key) % (1 << 24)).to_bytes(3, 'little'))
         if pl > 0: out = out[:-pl]
         return bytes(out)
+
     def _find_best_16bit_key(self, d, qb=False, tl=60.0):
         if len(d) < 3: return 0
         pl = (3 - len(d) % 3) % 3; pad = d + b'\x00' * pl
@@ -873,6 +924,7 @@ class UnifiedCompressor:
             if c < bc: bc = c; bk = k
             if c == 0: break
         return bk
+
     def transform_29(self, d, qb=False, tl=60.0):
         if not d: return b'\x00'
         bk = self._find_best_16bit_key(d, qb, tl)
@@ -893,6 +945,7 @@ class UnifiedCompressor:
             out.extend(((v + key) % (1 << 24)).to_bytes(3, 'little'))
         if pl > 0: out = out[:-pl]
         return bytes(out)
+
     def _find_best_24bit_key_heuristic(self, d):
         if len(d) < 3: return 0
         pl = (3 - len(d) % 3) % 3; pad = d + b'\x00' * pl
@@ -911,6 +964,7 @@ class UnifiedCompressor:
             c = sum(abs(t - mt) for t in tr)
             if c < bc: bc = c; bk = k
         return bk
+
     def transform_30(self, d):
         if not d: return b'\x00'
         bk = self._find_best_24bit_key_heuristic(d)
@@ -932,16 +986,18 @@ class UnifiedCompressor:
         if pl > 0: out = out[:-pl]
         return bytes(out)
 
+    # ================= 31, 32 =================
     def transform_31(self, d): return d
     def reverse_transform_31(self, d): return d
     def transform_32(self, d): return d
     def reverse_transform_32(self, d): return d
 
+    # ================= 33..40 =================
     def _paqjp_transform_23(self, d):
         if not d: return b'\x00' * 5
         bits = []
         for byte in d:
-            for i in range(7,-1,-1): bits.append((byte >> i) & 1)
+            for i in range(7, -1, -1): bits.append((byte >> i) & 1)
         return self._compress_bits(bits)
     def _paqjp_reverse_23(self, d):
         if not d or d == b'\x00'*5: return b''
@@ -964,7 +1020,7 @@ class UnifiedCompressor:
             for i in range(nb):
                 nib = (padded[i*4] << 3) | (padded[i*4+1] << 2) | (padded[i*4+2] << 1) | padded[i*4+3]
                 L, C = _CONST_DIAPASON_ITER_CODE[nib]
-                for b in range(L-1,-1,-1): eb.append((C >> b) & 1)
+                for b in range(L-1, -1, -1): eb.append((C >> b) & 1)
             nl = len(eb)
             if nl < pl: cur = eb; pl = nl; pc += 1
             else: break
@@ -983,7 +1039,7 @@ class UnifiedCompressor:
         cbl = struct.unpack('>H', data[3:5])[0]; payload = data[5:]
         bits = []
         for b in payload:
-            for i in range(7,-1,-1): bits.append((b >> i) & 1)
+            for i in range(7, -1, -1): bits.append((b >> i) & 1)
         if len(bits) < cbl: raise TransformError("CD2")
         cur = bits[:cbl]
         if pc == 0: return cur[:obl]
@@ -1001,10 +1057,11 @@ class UnifiedCompressor:
                 if not matched: raise TransformError("CD3")
             nb2 = []
             for nib in dn:
-                for j in range(3,-1,-1): nb2.append((nib >> j) & 1)
+                for j in range(3, -1, -1): nb2.append((nib >> j) & 1)
             cur = nb2
         if len(cur) < obl: raise TransformError("CD4")
         return cur[:obl]
+
     def _paqjp_transform_24(self, d):
         if not d: return struct.pack('>I', 0)
         ML = 43; bits = []; i = 0; n = len(d)
@@ -1023,13 +1080,14 @@ class UnifiedCompressor:
             for k in range(8): b = (b << 1) | bits[j+k]
             out.append(b)
         return struct.pack('>I', len(d)) + bytes(out)
+
     def _paqjp_reverse_24(self, d):
         if not d: return b''
         if len(d) < 4: raise TransformError("BR")
         ol = struct.unpack('>I', d[:4])[0]; pl = d[4:]
         bits = []
         for b in pl:
-            for i in range(7,-1,-1): bits.append((b >> i) & 1)
+            for i in range(7, -1, -1): bits.append((b >> i) & 1)
         pos = 0; nb = len(bits); out = bytearray()
         while pos < nb and len(out) < ol:
             if pos + 1 > nb: break
@@ -1047,6 +1105,7 @@ class UnifiedCompressor:
                 for _ in range(cl):
                     out.append(self._read_bits(bits, pos, 8)); pos += 8
         return bytes(out[:ol])
+
     def _paqjp_transform_25(self, d):
         if not d: return b'\x01'
         n = 3; res = bytearray(d)
@@ -1060,6 +1119,7 @@ class UnifiedCompressor:
         res = bytearray(d[1:])
         for i in range(len(res)): res[i] = (pow(res[i]+1, inv, 257) - 1) & 0xFF
         return bytes(res)
+
     def _paqjp_transform_26(self, d):
         if not d: return b'\x01\x00'
         n = (len(d)*7 + 13) & 0xFFFF
@@ -1079,6 +1139,7 @@ class UnifiedCompressor:
         res = bytearray(d[2:])
         for i in range(len(res)): res[i] = (pow(res[i]+1, inv, 257) - 1) & 0xFF
         return bytes(res)
+
     def _paqjp_transform_27(self, d):
         if not d:
             out = bytearray(b'\x00\x00\x00\x00'); out.extend(b'\x01\x00'); out.extend(b'\x00'*1024); return bytes(out)
@@ -1094,6 +1155,7 @@ class UnifiedCompressor:
             for i in range(BS): tr[i] = (pow(tr[i]+1, e200, 257) - 1) & 0xFF
             out.append(n & 0xFF); out.append((n >> 8) & 0xFF); out.extend(tr)
         return bytes(out)
+
     def _paqjp_reverse_27(self, d):
         if not d or len(d) < 4: raise TransformError("FLT27")
         ol = int.from_bytes(d[:4], 'big'); pl = d[4:]
@@ -1109,6 +1171,7 @@ class UnifiedCompressor:
             if inv is None: raise TransformError("FLT27")
             for i in range(BS): dec.append((pow(ch[i]+1, inv, 257) - 1) & 0xFF)
         return bytes(dec[:ol])
+
     def _compress_backend_with_flag(self, data):
         cand = []
         if HAS_ZSTD:
@@ -1119,6 +1182,7 @@ class UnifiedCompressor:
             except: pass
         cand.append(data)
         return min(cand, key=len)
+
     def _decompress_backend_with_flag(self, data):
         if not data: return b''
         if HAS_ZSTD:
@@ -1128,6 +1192,7 @@ class UnifiedCompressor:
             try: return paq.decompress(data)
             except Exception: pass
         return data
+
     def _paqjp_transform_28(self, d):
         BS = 1024
         if not d:
@@ -1151,6 +1216,7 @@ class UnifiedCompressor:
             out.append(n & 0xFF); out.append((n >> 8) & 0xFF)
             out.append((len(c) >> 8) & 0xFF); out.append(len(c) & 0xFF); out.extend(c)
         return bytes(out)
+
     def _paqjp_reverse_28(self, d):
         if not d or len(d) < 4: raise TransformError("FLT28")
         ol = int.from_bytes(d[:4], 'big'); pl = d[4:]
@@ -1169,6 +1235,7 @@ class UnifiedCompressor:
             for i in range(len(tr)): tr[i] = (pow(tr[i]+1, inv, 257) - 1) & 0xFF
             dec.extend(tr)
         return bytes(dec[:ol])
+
     def _paqjp_transform_29(self, d):
         BS = 32
         if not d:
@@ -1189,6 +1256,7 @@ class UnifiedCompressor:
             out.append(n & 0xFF); out.append((n >> 8) & 0xFF)
             out.append((len(c) >> 8) & 0xFF); out.append(len(c) & 0xFF); out.extend(c)
         return bytes(out)
+
     def _paqjp_reverse_29(self, d):
         if not d or len(d) < 4: raise TransformError("FLT29")
         ol = int.from_bytes(d[:4], 'big'); pl = d[4:]
@@ -1201,6 +1269,7 @@ class UnifiedCompressor:
             c = pl[pos:pos+cl]; pos += cl
             dec.extend(self._decompress_backend_with_flag(c))
         return bytes(dec[:ol])
+
     def _paqjp_transform_30(self, d):
         BS = 33
         if not d:
@@ -1219,6 +1288,7 @@ class UnifiedCompressor:
             c = self._compress_backend_with_flag(ch)
             out.extend(enc); out.append((len(c) >> 8) & 0xFF); out.append(len(c) & 0xFF); out.extend(c)
         return bytes(out)
+
     def _paqjp_reverse_30(self, d):
         if not d or len(d) < 4: raise TransformError("FLT30")
         ol = int.from_bytes(d[:4], 'big'); pl = d[4:]
@@ -1234,6 +1304,7 @@ class UnifiedCompressor:
             c = pl[pos:pos+cl]; pos += cl
             dec.extend(self._decompress_backend_with_flag(c))
         return bytes(dec[:ol])
+
     def _paqjp_compute_n_for_block(self, blk, bi, tl):
         if not blk: return (1, b'\x01\x01')
         d = blk[0]; x = (bi % 33) + 1
@@ -1245,18 +1316,21 @@ class UnifiedCompressor:
         nb = bytearray(h); nb[0] |= 1
         return (int.from_bytes(nb, 'big'), bytes([len(nb)]) + bytes(nb))
 
+    # ================= 41..47 =================
     def transform_41(self, d):
         if not d: return b''
         m = bytes([0x27, 0x03]); t = bytearray(d); n = min(len(t), 8)
         for i in range(n): t[i] ^= m[i % 2]
         return bytes(t)
     reverse_transform_41 = transform_41
+
     def transform_42(self, d):
         if not d: return b''
         t = bytearray(d); m = bytes([0x27, 0x03])
         for i in range(len(t)): t[i] ^= m[i % 2]
         return bytes(t)
     reverse_transform_42 = transform_42
+
     def transform_43(self, d):
         if not d: return b''
         t = bytearray(d); m = bytes([0x10, 0x00, 0x00])
@@ -1264,6 +1338,7 @@ class UnifiedCompressor:
             for j in range(min(3, len(t)-i)): t[i+j] ^= m[j]
         return bytes(t)
     reverse_transform_43 = transform_43
+
     def transform_44(self, d):
         if not d: return b''
         return base64.b64encode(d)
@@ -1271,6 +1346,7 @@ class UnifiedCompressor:
         if not d: return b''
         try: return base64.b64decode(d, validate=False)
         except Exception as e: raise TransformError(f"B64-44: {e}")
+
     @staticmethod
     def _huffman_code_lengths(freq):
         heap = [(f, i, i) for i, f in enumerate(freq) if f > 0]
@@ -1287,6 +1363,7 @@ class UnifiedCompressor:
             else: l, r = node; trav(l, depth+1); trav(r, depth+1)
         _, _, root = heap[0]; trav(root, 0)
         return L
+
     @staticmethod
     def _huffman_canonical_codes(cl):
         syms = list(range(len(cl))); syms.sort(key=lambda s: (cl[s], s))
@@ -1298,6 +1375,7 @@ class UnifiedCompressor:
             elif c != prev: code <<= (c - prev); prev = c
             codes[s] = (code, c); code += 1
         return codes
+
     def transform_45(self, d):
         if not d: return b''
         freq = [0]*256
@@ -1307,7 +1385,7 @@ class UnifiedCompressor:
         bits = []
         for b in d:
             c, L = codes[b]
-            for i in range(L-1,-1,-1): bits.append((c >> i) & 1)
+            for i in range(L-1, -1, -1): bits.append((c >> i) & 1)
         pad = (8 - len(bits) % 8) % 8; bits.extend([0]*pad)
         ob = bytearray()
         for i in range(0, len(bits), 8):
@@ -1315,6 +1393,7 @@ class UnifiedCompressor:
             for j in range(8): v = (v << 1) | bits[i+j]
             ob.append(v)
         return bytes(h) + bytes(ob)
+
     def reverse_transform_45(self, d):
         if not d: return b''
         if len(d) < 4 + 256: raise TransformError("Huff")
@@ -1332,7 +1411,7 @@ class UnifiedCompressor:
             c2s[(c, code)] = s; code += 1
         bits = []
         for b in pl:
-            for i in range(7,-1,-1): bits.append((b >> i) & 1)
+            for i in range(7, -1, -1): bits.append((b >> i) & 1)
         pos = 0; nb = len(bits); out = bytearray()
         ml = max(cl) if any(cl) else 0
         while pos < nb and len(out) < ol:
@@ -1346,12 +1425,14 @@ class UnifiedCompressor:
             if not found: raise TransformError("Huff")
         if len(out) != ol: raise TransformError("Huff")
         return bytes(out)
+
     def transform_46(self, d):
         if not d: return b''
         t = bytearray(d); m = self.mask_46
         for i in range(len(t)): t[i] ^= m[i % len(m)]
         return bytes(t)
     reverse_transform_46 = transform_46
+
     def transform_47(self, d):
         if not d: return b''
         t = bytearray(d); tl = len(self.mod_state_table)
@@ -1360,6 +1441,7 @@ class UnifiedCompressor:
         return bytes(t)
     reverse_transform_47 = transform_47
 
+    # ================= 57 =================
     def transform_57(self, d):
         if len(d) < 4:
             pl = 4 - len(d); key = 0
@@ -1381,16 +1463,58 @@ class UnifiedCompressor:
         return bytes(out)
 
     # ==================================================================
-    # ALGORITHM 58 (UPGRADED) — self-terminating bit-RLE, iterated 1..256
+    # ALGORITHM 58 — 5-bit substitution prepass + bit-RLE (1101 escape)
     # ==================================================================
+    def _fivebit_subst_forward(self, bits):
+        """Bijective 3-cycle per 5-bit group:
+           11010 -> 00100 -> 01010 -> 11010
+           11011 -> 00101 -> 01011 -> 11011
+        Returns (new_bits, pad)."""
+        pad = (5 - len(bits) % 5) % 5
+        b = bits + [0] * pad
+        out = []
+        for i in range(0, len(b), 5):
+            v = (b[i] << 4) | (b[i+1] << 3) | (b[i+2] << 2) | (b[i+3] << 1) | b[i+4]
+            if   v == 0b11010: v = 0b00100
+            elif v == 0b00100: v = 0b01010
+            elif v == 0b01010: v = 0b11010
+            elif v == 0b11011: v = 0b00101
+            elif v == 0b00101: v = 0b01011
+            elif v == 0b01011: v = 0b11011
+            out.extend([(v >> 4) & 1, (v >> 3) & 1, (v >> 2) & 1,
+                        (v >> 1) & 1, v & 1])
+        return out, pad
+
+    def _fivebit_subst_reverse(self, bits, pad):
+        """Inverse of the forward 3-cycle."""
+        out = []
+        for i in range(0, len(bits), 5):
+            v = (bits[i] << 4) | (bits[i+1] << 3) | (bits[i+2] << 2) | (bits[i+3] << 1) | bits[i+4]
+            if   v == 0b00100: v = 0b11010
+            elif v == 0b01010: v = 0b00100
+            elif v == 0b11010: v = 0b01010
+            elif v == 0b00101: v = 0b11011
+            elif v == 0b01011: v = 0b00101
+            elif v == 0b11011: v = 0b01011
+            out.extend([(v >> 4) & 1, (v >> 3) & 1, (v >> 2) & 1,
+                        (v >> 1) & 1, v & 1])
+        if pad > 0:
+            out = out[:-pad]
+        return out
+
     def _bit_rle_encode(self, data: bytes) -> bytes:
         if not data:
-            return struct.pack('>H', 0)
+            return struct.pack('>H', 0) + b'\x00' + struct.pack('>H', 0)
         bits = []
         for byte in data:
             for i in range(7, -1, -1):
                 bits.append((byte >> i) & 1)
         orig_bit_count = len(bits)
+
+        # 5-bit substitution prepass (applied once)
+        bits, subst_pad = self._fivebit_subst_forward(bits)
+
+        # bit-RLE with 1101 escape (value bit first, symmetric for 0/1)
         out_bits = []
         i = 0
         n = len(bits)
@@ -1410,7 +1534,7 @@ class UnifiedCompressor:
                 elif ch == 3:
                     out_bits.extend([1, 1, 0])
                 else:
-                    out_bits.extend([1, 1, 1])
+                    out_bits.extend([1, 1, 0, 1])           # '1101' escape
                     lc = ch - 4
                     for k in range(7, -1, -1):
                         out_bits.append((lc >> k) & 1)
@@ -1424,54 +1548,64 @@ class UnifiedCompressor:
             for j in range(8):
                 b = (b << 1) | out_bits[i + j]
             packed.append(b)
-        return struct.pack('>H', orig_bit_count) + bytes(packed)
+        comp_bit_count = len(out_bits) - pad
+        return (struct.pack('>H', orig_bit_count) + bytes([subst_pad]) +
+                struct.pack('>H', comp_bit_count) + bytes(packed))
 
     def _bit_rle_decode(self, data: bytes) -> bytes:
-        if len(data) < 2:
+        if len(data) < 5:
             raise TransformError("BRLE short")
         orig_bit_count = struct.unpack('>H', data[:2])[0]
+        subst_pad      = data[2]
+        comp_bit_count = struct.unpack('>H', data[3:5])[0]
+        payload        = data[5:]
         if orig_bit_count == 0:
             return b''
-        payload = data[2:]
         bits = []
         for byte in payload:
             for i in range(7, -1, -1):
                 bits.append((byte >> i) & 1)
+        bits = bits[:comp_bit_count]
+
+        # reverse bit-RLE (1101 escape)
         out_bits = []
         pos = 0
         nbits = len(bits)
-        while len(out_bits) < orig_bit_count:
-            if pos >= nbits:
-                raise TransformError("BRLE eof")
+        while pos < nbits:
+            if pos >= nbits: break
             val = bits[pos]; pos += 1
-            if pos >= nbits:
-                raise TransformError("BRLE eof2")
+            if pos >= nbits: break
             if bits[pos] == 0:
                 run = 1; pos += 1
             else:
                 pos += 1
-                if pos >= nbits:
-                    raise TransformError("BRLE eof3")
+                if pos >= nbits: raise TransformError("BRLE eof3")
                 if bits[pos] == 0:
                     run = 2; pos += 1
                 else:
                     pos += 1
-                    if pos >= nbits:
-                        raise TransformError("BRLE eof4")
+                    if pos >= nbits: raise TransformError("BRLE eof4")
                     if bits[pos] == 0:
                         run = 3; pos += 1
                     else:
                         pos += 1
-                        if pos + 8 > nbits:
-                            raise TransformError("BRLE eof5")
+                        if pos >= nbits: raise TransformError("BRLE eof5")
+                        if bits[pos] != 1: raise TransformError("BRLE escape")
+                        pos += 1
+                        if pos + 8 > nbits: raise TransformError("BRLE eof6")
                         lc = 0
                         for _ in range(8):
                             lc = (lc << 1) | bits[pos]; pos += 1
                         run = lc + 4
             out_bits.extend([val] * run)
+
+        # inverse 5-bit substitution
+        out_bits = self._fivebit_subst_reverse(out_bits, subst_pad)
         out_bits = out_bits[:orig_bit_count]
-        pad = (8 - len(out_bits) % 8) % 8
-        out_bits.extend([0] * pad)
+
+        # pack to bytes
+        pad2 = (8 - len(out_bits) % 8) % 8
+        out_bits.extend([0] * pad2)
         out = bytearray()
         for i in range(0, len(out_bits), 8):
             b = 0
@@ -1480,7 +1614,7 @@ class UnifiedCompressor:
             out.append(b)
         return bytes(out)
 
-    def _bit_rle_iterate(self, data: bytes, max_passes: int = 256):
+    def _bit_rle_iterate(self, data, max_passes=256):
         best = None
         best_size = len(data)
         best_passes = 0
@@ -1494,14 +1628,11 @@ class UnifiedCompressor:
                 break
             current = encoded
             if len(current) < best_size:
-                best = current
-                best_size = len(current)
-                best_passes = p
+                best = current; best_size = len(current); best_passes = p
         return best, best_passes
 
-    def transform_58(self, data: bytes) -> bytes:
-        if not data:
-            return struct.pack('>I', 0)
+    def transform_58(self, data):
+        if not data: return struct.pack('>I', 0)
         BLOCK = 256
         body = bytearray()
         for s in range(0, len(data), BLOCK):
@@ -1520,28 +1651,22 @@ class UnifiedCompressor:
             return b'\x01' + struct.pack('>I', len(data)) + bytes(body)
         return b'\x00' + struct.pack('>I', len(data)) + data
 
-    def reverse_transform_58(self, data: bytes) -> bytes:
-        if len(data) < 5:
-            raise TransformError("T58 short")
+    def reverse_transform_58(self, data):
+        if len(data) < 5: raise TransformError("T58 short")
         top = data[0]
         ol = struct.unpack('>I', data[1:5])[0]
         pl = data[5:]
         if top == 0:
-            if len(pl) != ol:
-                raise TransformError("T58 raw len")
+            if len(pl) != ol: raise TransformError("T58 raw len")
             return bytes(pl)
-        if top != 1:
-            raise TransformError("T58 flag")
-        out = bytearray()
-        pos = 0
+        if top != 1: raise TransformError("T58 flag")
+        out = bytearray(); pos = 0
         while pos < len(pl) and len(out) < ol:
-            if pos + 4 > len(pl):
-                raise TransformError("T58 blk hdr")
+            if pos + 4 > len(pl): raise TransformError("T58 blk hdr")
             f = pl[pos]; pos += 1
             passes_minus_1 = pl[pos]; pos += 1
             bl = struct.unpack('>H', pl[pos:pos+2])[0]; pos += 2
-            if pos + bl > len(pl):
-                raise TransformError("T58 blk data")
+            if pos + bl > len(pl): raise TransformError("T58 blk data")
             bd = pl[pos:pos+bl]; pos += bl
             if f == 0:
                 out.extend(bd)
@@ -1554,10 +1679,10 @@ class UnifiedCompressor:
                 out.extend(current[:cs])
             else:
                 raise TransformError("T58 blk flag")
-        if len(out) != ol:
-            raise TransformError("T58 len")
+        if len(out) != ol: raise TransformError("T58 len")
         return bytes(out)
 
+    # ================= 59, 60 =================
     def transform_59(self, data):
         if not data: return b''
         out = bytearray([data[0]])
@@ -1618,8 +1743,8 @@ class UnifiedCompressor:
     def _decompress_line_dict(self, d): print("Line not impl."); return None
 
     def _build_transform_maps(self):
-        self.fwd_transforms: Dict[int, Callable] = {}
-        self.rev_transforms: Dict[int, Callable] = {}
+        self.fwd_transforms = {}
+        self.rev_transforms = {}
         for i in range(1, 22):
             self.fwd_transforms[i] = getattr(self, f"transform_{i:02d}")
             self.rev_transforms[i] = getattr(self, f"reverse_transform_{i:02d}")
@@ -1672,6 +1797,7 @@ class UnifiedCompressor:
         except Exception as e:
             print(f"Warn: {e}"); return [], {}
         sw = sorted(ws); return sw, {w: i for i, w in enumerate(sw)}
+
     def _load_line_dictionary(self):
         if not os.path.exists(COMBINED_DICTIONARY_FILE): return [], {}
         lines = []
@@ -1708,6 +1834,7 @@ class UnifiedCompressor:
         except Exception:
             rng = random.Random(seed); size = 1 << nq
             p = list(range(size)); rng.shuffle(p); return p
+
     def _precompute_quantum_transforms(self):
         if not USE_QUANTUM or not HAS_QISKIT: return
         q = self.QUANTUM_QUBITS
@@ -1724,6 +1851,7 @@ class UnifiedCompressor:
             self.fwd_transforms[256+idx] = f; self.rev_transforms[256+idx] = r
         self.quantum_transforms_built = True
         print(f"Quantum: {n} transforms, block={bs}, qubits={q}")
+
     def _make_substitution_transform(self, perm, size):
         if size < 256:
             inv = [0]*size
@@ -1746,16 +1874,19 @@ class UnifiedCompressor:
     def _get_pattern(self, size, index):
         random.seed(12345 + size*100 + index)
         return [random.randint(0, 255) for _ in range(size)]
+
     def _calculate_repeats(self, data):
         if not data: return 1
         r = ((len(data)*13 + (sum(data) % 256)*17) % 256) + 1
         return max(1, min(256, r))
+
     def _verify_lossless(self, orig, trans, rev):
         try: return rev(trans) == orig
         except TransformError: return False
         except Exception: return False
 
     WINDOW_SIZE = 2048; MIN_MATCH = 3; MAX_MATCH = 2048; MAX_DIST = 2048
+
     def _lz77_tokenize(self, data):
         tokens = []; i = 0; n = len(data)
         while i < n:
@@ -1772,6 +1903,7 @@ class UnifiedCompressor:
             if bl >= self.MIN_MATCH: tokens.append(('M', bd, bl)); i += bl
             else: tokens.append(('L', data[i], None)); i += 1
         return tokens
+
     def _lz77_untokenize(self, tokens):
         out = bytearray()
         for t in tokens:
@@ -1780,6 +1912,7 @@ class UnifiedCompressor:
                 d, l = t[1], t[2]; s = len(out) - d
                 for k in range(l): out.append(out[s+k])
         return bytes(out)
+
     def _encode_lzh(self, data):
         tokens = self._lz77_tokenize(data)
         lf = [0]*256; df = [0]*(self.MAX_DIST+1); nf = [0]*(self.MAX_MATCH+1)
@@ -1794,12 +1927,12 @@ class UnifiedCompressor:
         for t in tokens:
             if t[0] == 'L':
                 bits.append(0); cd, cl = lc[t[1]]
-                for i in range(cl-1,-1,-1): bits.append((cd >> i) & 1)
+                for i in range(cl-1, -1, -1): bits.append((cd >> i) & 1)
             else:
                 bits.append(1); cd, cl = dc[t[1]]
-                for i in range(cl-1,-1,-1): bits.append((cd >> i) & 1)
+                for i in range(cl-1, -1, -1): bits.append((cd >> i) & 1)
                 cd, cl = nc[t[2]]
-                for i in range(cl-1,-1,-1): bits.append((cd >> i) & 1)
+                for i in range(cl-1, -1, -1): bits.append((cd >> i) & 1)
         pad = (8 - len(bits) % 8) % 8; bits.extend([0]*pad)
         def pk(L): return b''.join(struct.pack('>H', x) for x in L)
         h = bytearray(); h.extend(pk(lcl)); h.extend(pk(dcl)); h.extend(pk(ncl))
@@ -1808,6 +1941,7 @@ class UnifiedCompressor:
             for j in range(8): b = (b << 1) | bits[i+j]
             h.append(b)
         return bytes(h)
+
     def _decode_lzh(self, data):
         LB = 256*2; DB = 2049*2; NB = 2049*2
         if len(data) < LB+DB+NB: raise TransformError("LZH short")
@@ -1832,7 +1966,7 @@ class UnifiedCompressor:
         tc = struct.unpack('>I', pl[:4])[0]
         bits = []
         for b in pl[4:]:
-            for i in range(7,-1,-1): bits.append((b >> i) & 1)
+            for i in range(7, -1, -1): bits.append((b >> i) & 1)
         bp = 0; tokens = []
         for _ in range(tc):
             if bp >= len(bits): raise TransformError("LZH eof")
@@ -1870,7 +2004,9 @@ class UnifiedCompressor:
         if t <= 252: return bytes([t - 1])
         elif t <= 255: return bytes([254, t - 253])
         else: return bytes([255, (t-256)//256, (t-256) % 256])
+
     def _encode_marker_raw(self): return bytes([252])
+
     def _decode_header(self, data):
         if len(data) < 1: return 0, ()
         f = data[0]
@@ -1886,10 +2022,7 @@ class UnifiedCompressor:
             return 3, (256 + data[1]*256 + data[2],)
         return 0, ()
 
-    # ==================================================================
-    # BACKEND — try zstd / paq / raw, no flag byte
-    # ==================================================================
-    def _compress_backend(self, data: bytes) -> bytes:
+    def _compress_backend(self, data):
         candidates = [data]
         if HAS_ZSTD:
             try: candidates.append(zstd_cctx.compress(data))
@@ -1899,7 +2032,7 @@ class UnifiedCompressor:
             except Exception: pass
         return min(candidates, key=len)
 
-    def _decompress_backend(self, data: bytes) -> Optional[bytes]:
+    def _decompress_backend(self, data):
         if not data: return b''
         if HAS_ZSTD:
             try: return zstd_dctx.decompress(data)
@@ -1982,6 +2115,7 @@ class UnifiedCompressor:
 
     def _auto_output_name(self, infile, suffix=".jp"):
         return f"{os.path.basename(infile)}{suffix}"
+
     def _atomic_write(self, path, data):
         dn = os.path.dirname(path) or '.'
         bn = os.path.basename(path)
@@ -1991,11 +2125,11 @@ class UnifiedCompressor:
         finally:
             os.close(fd)
         os.replace(tmp, path)
+
     def compress_file(self, infile, outfile="", use_lzh=False, time_limit=None):
         try:
             with open(infile, 'rb') as f: data = f.read()
-        except Exception as e:
-            print(f"Read error: {e}"); return
+        except Exception as e: print(f"Read error: {e}"); return
         try:
             if use_lzh:
                 c = self.compress_with_lzh(data, time_limit); suf = ".jp.lzh"
@@ -2008,6 +2142,7 @@ class UnifiedCompressor:
         except Exception as e:
             print(f"Write error: {e}"); return
         print(f"Compressed {len(data)} → {len(c)} bytes → {outfile}")
+
     def decompress_file(self, infile, outfile=""):
         try:
             with open(infile, 'rb') as f: data = f.read()
@@ -2042,10 +2177,10 @@ class UnifiedCompressor:
         print(f"Decompressed → {outfile} ({len(orig)} bytes)")
         return True
 
-    def full_self_test(self) -> bool:
-        print("="*60)
-        print("Unified PAQJP+PJP – Self‑Test (Algorithm 58 repeats 1-256)")
-        print("="*60)
+    def full_self_test(self):
+        print("=" * 60)
+        print("Self-Test (Algorithm 58: 5-bit subst + 1101 escape)")
+        print("=" * 60)
         print(f"zstandard available: {HAS_ZSTD}")
         print(f"paq available:       {paq is not None}")
         test_byte_values = [0x00, 0xFF, 0xAA, 0x55, 0x12, 0x34]
@@ -2063,14 +2198,18 @@ class UnifiedCompressor:
                 except Exception as e:
                     print(f"  EXC t={t} byte={tb:#04x}: {e}"); all_ok = False; break
             if not all_ok: break
-        if not all_ok:
-            print("\n  FAILED"); return False
+        if not all_ok: print("\n  FAILED"); return False
         print("\n  All 256 transforms passed on test bytes.")
-        print("\nAlgorithm 58 repeat demo (16×00 + 16×FF):")
-        demo = b'\x00' * 16 + b'\xFF' * 16
-        enc = self.transform_58(demo)
-        dec = self.reverse_transform_58(enc)
-        print(f"  demo in={len(demo)}B  t58 out={len(enc)}B  roundtrip={dec == demo}")
+        print("\nAlgorithm 58 demo (1101 escape + 5-bit subst):")
+        for demo, label in [
+            (b'\x00' * 16 + b'\xFF' * 16, "16x00 + 16xFF"),
+            (b'\xAA' * 32, "32xAA"),
+            (b'\x00\xFF' * 16, "16x 00FF"),
+            (b'\x3F' * 32, "32x 3F"),
+        ]:
+            enc = self.transform_58(demo)
+            dec = self.reverse_transform_58(enc)
+            print(f"  {label:20s}  in={len(demo):3d}B  t58={len(enc):3d}B  OK={dec == demo}")
         print("\nRandom 100-byte compress+decompress...")
         rng = random.Random(12345)
         td = bytes(rng.randint(0, 255) for _ in range(100))
@@ -2084,20 +2223,21 @@ class UnifiedCompressor:
         print("\n[All checks passed – 100% lossless]")
         return True
 
+
 def main():
     print(f"{PROGNAME}")
     print("Compressed output: input.txt.jp (or .jp.lzh)")
     print(f"Backend: {'zstd/paq auto-detect' if HAS_ZSTD else 'paq auto-detect'} — no flag byte.")
-    print(f"Algorithm 58: iterated bit-RLE up to {UnifiedCompressor.RLE58_MAX_PASSES} passes per block.")
+    print(f"Algorithm 58: 5-bit subst + bit-RLE with 1101 escape, iterated 1..256 passes")
     print("Lossless output guaranteed via per-input verification.\n")
     c = UnifiedCompressor()
-    print("="*58)
+    print("=" * 58)
     print("Options:")
     print("  1) Compress (Fast)")
     print("  2) Decompress")
     print("  3) Full self-test")
     print("  0) Exit")
-    print("="*58)
+    print("=" * 58)
     while True:
         print("\nMenu:")
         print("1) Compress (Fast)")
@@ -2117,9 +2257,13 @@ def main():
                 outf = input("Output file (blank = auto): ").strip()
                 if c.decompress_file(inf, outf): break
                 print("Failed. Try again or Enter to cancel.")
-        elif ch == "3": c.full_self_test()
-        elif ch == "0": break
-        else: print("Invalid.")
+        elif ch == "3":
+            c.full_self_test()
+        elif ch == "0":
+            break
+        else:
+            print("Invalid.")
+
 
 if __name__ == "__main__":
     main()
