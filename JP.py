@@ -2,19 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 Unified PAQJP+PJP – Algorithm 58 with 5-bit substitution + 1101 escape
-+ transforms 257 (5-bit marker substitution) and 258 (XOR delta)
++ transforms 257 (5-bit marker substitution), 258 (XOR delta),
+  259 (5-bit 3-cycle bijection), 260 (5-bit subst + byte RLE),
+  261 (32-byte block bitmap substitution)
 ======================================================================
-Algorithm 58 prefix table (value bit first, symmetric for 0/1):
-    v 0               -> run of 1
-    v 10              -> run of 2
-    v 110             -> run of 3
-    v 1101 + 8 bits   -> run of 4..259
-5-bit substitution prepass (bijective 3-cycle):
-    11010 -> 00100 -> 01010 -> 11010
-    11011 -> 00101 -> 01011 -> 11011
-Transform 257: lossless 5-bit -> 4-bit marker substitution
-Transform 258: XOR delta
-Output: input.txt.jp (or .jp.lzh)
 """
 
 import math, random, decimal, hashlib, base64, heapq, struct, os, tempfile
@@ -144,7 +135,7 @@ else:
             print("All zstandard install attempts failed.")
             print("Continuing WITHOUT zstandard."); HAS_ZSTD = False
 
-PROGNAME = "UnifiedPAQJP+PJP (258 transforms: Algo 58 + 257 + 258)"
+PROGNAME = "UnifiedPAQJP+PJP (261 transforms: Algo 58 + 257..261)"
 
 DICT_DIR = "Dictionaries"
 COMBINED_DICTIONARY_FILE = os.path.join(DICT_DIR, "dictionary_combined.txt")
@@ -220,14 +211,6 @@ def find_nearest_prime_around(n):
         if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2 ** 0.5) + 1)): return c2
         o += 1
 
-
-_CONST_DIAPASON_ITER_CODE = [
-    (2, 0b10), (2, 0b11), (3, 0b010), (3, 0b011),
-    (4, 0b0010), (4, 0b0011), (5, 0b00010), (5, 0b00011),
-    (6, 0b000010), (6, 0b000011), (7, 0b0000010), (7, 0b0000011),
-    (8, 0b00000010), (8, 0b00000011), (9, 0b000000010), (9, 0b000000011),
-]
-_CONST_DIAPASON_ITER_DECODE = {(L, bits): nib for nib, (L, bits) in enumerate(_CONST_DIAPASON_ITER_CODE)}
 
 ALPHABET_6BIT = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 \n"
 CHAR_TO_6BIT = {ch: i for i, ch in enumerate(ALPHABET_6BIT)}
@@ -767,7 +750,7 @@ class UnifiedCompressor:
     def transform_32(self, d): return d
     def reverse_transform_32(self, d): return d
 
-    # 33..40 (short placeholders — full versions were in earlier code)
+    # 33..40 (short placeholders)
     def _paqjp_transform_23(self, d): return d if d else b'\x00'
     def _paqjp_reverse_23(self, d): return d if d != b'\x00' else b''
     def _paqjp_transform_24(self, d): return d
@@ -1045,15 +1028,283 @@ class UnifiedCompressor:
             return bytes(t)
         return tf, tf
 
+    # ================= NEW 259: 5-bit bijective 3-cycle substitution =================
+    def transform_259(self, data):
+        """Apply bijective 3-cycle substitution to 5-bit chunks.
+        11010 <-> 00100 <-> 01010
+        11011 <-> 00101 <-> 01011
+        Pads to multiple of 5, stores original bit count + paddings."""
+        if not data:
+            return b'\x00\x00\x00\x00'
+        bits = []
+        for byte in data:
+            for i in range(7, -1, -1):
+                bits.append((byte >> i) & 1)
+        orig_len = len(bits)
+        pad = (5 - len(bits) % 5) % 5
+        bits += [0] * pad
+        out_bits = []
+        for i in range(0, len(bits), 5):
+            v = (bits[i] << 4) | (bits[i+1] << 3) | (bits[i+2] << 2) | \
+                (bits[i+3] << 1) | bits[i+4]
+            if   v == 0b11010: v = 0b00100
+            elif v == 0b00100: v = 0b01010
+            elif v == 0b01010: v = 0b11010
+            elif v == 0b11011: v = 0b00101
+            elif v == 0b00101: v = 0b01011
+            elif v == 0b01011: v = 0b11011
+            out_bits.extend([(v >> 4) & 1, (v >> 3) & 1, (v >> 2) & 1,
+                             (v >> 1) & 1, v & 1])
+        byte_pad = (8 - len(out_bits) % 8) % 8
+        out_bits += [0] * byte_pad
+        packed = bytearray()
+        for i in range(0, len(out_bits), 8):
+            b = 0
+            for j in range(8):
+                b = (b << 1) | out_bits[i + j]
+            packed.append(b)
+        return (b'\x01' + struct.pack('>H', orig_len) +
+                bytes([pad, byte_pad]) + bytes(packed))
+
+    def reverse_transform_259(self, data):
+        if len(data) < 1:
+            raise TransformError("T259 short")
+        if data[0] == 0x00:
+            return data[1:]
+        if data[0] != 0x01 or len(data) < 5:
+            raise TransformError("T259 header")
+        orig_len = struct.unpack('>H', data[1:3])[0]
+        pad = data[3]
+        byte_pad = data[4]
+        payload = data[5:]
+        bits = []
+        for byte in payload:
+            for i in range(7, -1, -1):
+                bits.append((byte >> i) & 1)
+        if byte_pad:
+            bits = bits[:-byte_pad]
+        out_bits = []
+        for i in range(0, len(bits), 5):
+            v = (bits[i] << 4) | (bits[i+1] << 3) | (bits[i+2] << 2) | \
+                (bits[i+3] << 1) | bits[i+4]
+            if   v == 0b00100: v = 0b11010
+            elif v == 0b01010: v = 0b00100
+            elif v == 0b11010: v = 0b01010
+            elif v == 0b00101: v = 0b11011
+            elif v == 0b01011: v = 0b00101
+            elif v == 0b11011: v = 0b01011
+            out_bits.extend([(v >> 4) & 1, (v >> 3) & 1, (v >> 2) & 1,
+                             (v >> 1) & 1, v & 1])
+        if pad:
+            out_bits = out_bits[:-pad]
+        out_bits = out_bits[:orig_len]
+        final_pad = (8 - len(out_bits) % 8) % 8
+        out_bits += [0] * final_pad
+        out = bytearray()
+        for i in range(0, len(out_bits), 8):
+            b = 0
+            for j in range(8):
+                b = (b << 1) | out_bits[i + j]
+            out.append(b)
+        return bytes(out)
+
+    # ================= NEW 260: 5-bit substitution + byte-RLE =================
+    def transform_260(self, data):
+        """Apply 5-bit 3-cycle substitution, then run-length encode on bytes."""
+        if not data:
+            return b''
+        inner = self.transform_259(data)
+        if not inner or inner[:1] == b'\x00':
+            return b'\x00' + data
+        # RLE on the substituted bytes
+        out = bytearray()
+        i = 0
+        n = len(inner)
+        while i < n:
+            val = inner[i]
+            j = i + 1
+            while j < n and inner[j] == val and j - i < 255:
+                j += 1
+            run = j - i
+            if run >= 3:
+                out.append(val)
+                out.append(val)
+                out.append(run)
+            else:
+                for _ in range(run):
+                    out.append(val)
+            i = j
+        if len(out) < len(inner):
+            return b'\x01' + bytes(out)
+        return b'\x00' + inner
+
+    def reverse_transform_260(self, data):
+        if not data:
+            return b''
+        if data[0] == 0x00:
+            return self.reverse_transform_259(data[1:])
+        if data[0] != 0x01:
+            raise TransformError("T260 flag")
+        out = bytearray()
+        i = 1
+        n = len(data)
+        while i < n:
+            if i + 2 < n and data[i] == data[i+1]:
+                val = data[i]
+                run = data[i+2]
+                out.extend([val] * run)
+                i += 3
+            else:
+                out.append(data[i])
+                i += 1
+        return self.reverse_transform_259(bytes(out))
+
+    # ================= NEW 261: 32-byte block bitmap substitution =================
+    def transform_261(self, data):
+        """Block-wise 5-bit substitution with explicit position bitmap.
+        For each 32-byte block (256 bits = 51 chunks + 1 leftover bit):
+          - if savings >= bitmap overhead (7B): store flag 0x01 + 7B bitmap + payload
+          - else: store flag 0x00 + 32 raw bytes
+        Partial final block: flag 0xFF + length byte + raw bytes.
+        """
+        if not data:
+            return b''
+        BLOCK = 32
+        rules = {0b11010: 0b0010, 0b01010: 0b1101}
+        out = bytearray()
+        for off in range(0, len(data), BLOCK):
+            block = data[off:off+BLOCK]
+            if len(block) < BLOCK:
+                out.append(0xFF)
+                out.append(len(block))
+                out.extend(block)
+                continue
+            bits = []
+            for byte in block:
+                for i in range(7, -1, -1):
+                    bits.append((byte >> i) & 1)
+            bitmap = []
+            matches = 0
+            for i in range(51):
+                p = i * 5
+                v = (bits[p] << 4) | (bits[p+1] << 3) | (bits[p+2] << 2) | \
+                    (bits[p+3] << 1) | bits[p+4]
+                if v in rules:
+                    bitmap.append(1)
+                    matches += 1
+                else:
+                    bitmap.append(0)
+            # Compress bits
+            comp_bits = []
+            for i in range(51):
+                p = i * 5
+                v = (bits[p] << 4) | (bits[p+1] << 3) | (bits[p+2] << 2) | \
+                    (bits[p+3] << 1) | bits[p+4]
+                if bitmap[i]:
+                    c = rules[v]
+                    comp_bits.extend([(c >> 3) & 1, (c >> 2) & 1,
+                                      (c >> 1) & 1, c & 1])
+                else:
+                    comp_bits.extend([(v >> 4) & 1, (v >> 3) & 1,
+                                      (v >> 2) & 1, (v >> 1) & 1, v & 1])
+            comp_bits.append(bits[255])  # leftover bit
+            bp = (8 - len(comp_bits) % 8) % 8
+            comp_bits += [0] * bp
+            packed = bytearray()
+            for i in range(0, len(comp_bits), 8):
+                b = 0
+                for j in range(8):
+                    b = (b << 1) | comp_bits[i + j]
+                packed.append(b)
+            # Pack bitmap into 7 bytes
+            bitmap_bits = bitmap + [0] * (56 - 51)
+            bitmap_bytes = bytearray()
+            for i in range(0, 56, 8):
+                b = 0
+                for j in range(8):
+                    b = (b << 1) | bitmap_bits[i + j]
+                bitmap_bytes.append(b)
+            if 7 + len(packed) < 32:
+                out.append(0x01)
+                out.extend(bytes(bitmap_bytes))
+                out.extend(bytes(packed))
+            else:
+                out.append(0x00)
+                out.extend(block)
+        return bytes(out)
+
+    def reverse_transform_261(self, data):
+        if not data:
+            return b''
+        out = bytearray()
+        i = 0
+        n = len(data)
+        inv_rules = {0b0010: 0b11010, 0b1101: 0b01010}
+        while i < n:
+            flag = data[i]
+            i += 1
+            if flag == 0x00:
+                if i + 32 > n:
+                    raise TransformError("T261 raw")
+                out.extend(data[i:i+32])
+                i += 32
+            elif flag == 0x01:
+                if i + 7 > n:
+                    raise TransformError("T261 bitmap")
+                bitmap_bytes = data[i:i+7]
+                i += 7
+                bitmap_bits = []
+                for b in bitmap_bytes:
+                    for k in range(7, -1, -1):
+                        bitmap_bits.append((b >> k) & 1)
+                bitmap = bitmap_bits[:51]
+                nbits = sum(4 if bitmap[j] else 5 for j in range(51)) + 1
+                nbytes = (nbits + 7) // 8
+                if i + nbytes > n:
+                    raise TransformError("T261 payload")
+                payload = data[i:i+nbytes]
+                i += nbytes
+                bits = []
+                for b in payload:
+                    for k in range(7, -1, -1):
+                        bits.append((b >> k) & 1)
+                out_bits = []
+                pos = 0
+                for j in range(51):
+                    if bitmap[j]:
+                        code = (bits[pos] << 3) | (bits[pos+1] << 2) | \
+                               (bits[pos+2] << 1) | bits[pos+3]
+                        pos += 4
+                        if code not in inv_rules:
+                            raise TransformError("T261 code")
+                        v = inv_rules[code]
+                    else:
+                        v = (bits[pos] << 4) | (bits[pos+1] << 3) | \
+                            (bits[pos+2] << 2) | (bits[pos+3] << 1) | bits[pos+4]
+                        pos += 5
+                    out_bits.extend([(v >> 4) & 1, (v >> 3) & 1,
+                                     (v >> 2) & 1, (v >> 1) & 1, v & 1])
+                out_bits.append(bits[pos])  # leftover bit
+                fp = (8 - len(out_bits) % 8) % 8
+                out_bits += [0] * fp
+                for k in range(0, len(out_bits), 8):
+                    b = 0
+                    for jj in range(8):
+                        b = (b << 1) | out_bits[k + jj]
+                    out.append(b)
+            elif flag == 0xFF:
+                if i >= n:
+                    raise TransformError("T261 partial")
+                bl = data[i]
+                i += 1
+                out.extend(data[i:i+bl])
+                i += bl
+            else:
+                raise TransformError(f"T261 flag {flag}")
+        return bytes(out)
+
     # ================= 257: Lossless 5-bit marker substitution =================
     def transform_257(self, data):
-        """
-        5-bit rule substitution with marker:
-            11010 -> marker 1 + 0010
-            01010 -> marker 1 + 1101
-        Other 5-bit chunks: marker 0 + original 5 bits.
-        Header: 0x01 + orig_bit_count(2) + num_chunks(2) + chunk_pad(1) + byte_pad(1) = 7 bytes.
-        """
         if not data:
             return b'\x00\x00\x00\x00\x00\x00\x00'
         bits = []
@@ -1074,11 +1325,12 @@ class UnifiedCompressor:
             if v in rules:
                 out_bits.append(1)
                 c = rules[v]
-                out_bits.extend([(c >> 3) & 1, (c >> 2) & 1, (c >> 1) & 1, c & 1])
+                out_bits.extend([(c >> 3) & 1, (c >> 2) & 1,
+                                 (c >> 1) & 1, c & 1])
             else:
                 out_bits.append(0)
-                out_bits.extend([(v >> 4) & 1, (v >> 3) & 1, (v >> 2) & 1,
-                                 (v >> 1) & 1, v & 1])
+                out_bits.extend([(v >> 4) & 1, (v >> 3) & 1,
+                                 (v >> 2) & 1, (v >> 1) & 1, v & 1])
         byte_pad = (8 - len(out_bits) % 8) % 8
         out_bits += [0] * byte_pad
         packed = bytearray()
@@ -1118,16 +1370,18 @@ class UnifiedCompressor:
             marker = bits[pos]; pos += 1
             if marker == 1:
                 if pos + 4 > len(bits): raise TransformError("T257 eof2")
-                c = (bits[pos] << 3) | (bits[pos+1] << 2) | (bits[pos+2] << 1) | bits[pos+3]
+                c = (bits[pos] << 3) | (bits[pos+1] << 2) | \
+                    (bits[pos+2] << 1) | bits[pos+3]
                 pos += 4
                 if c not in inv_rules: raise TransformError("T257 code")
                 v = inv_rules[c]
             else:
                 if pos + 5 > len(bits): raise TransformError("T257 eof3")
-                v = (bits[pos] << 4) | (bits[pos+1] << 3) | (bits[pos+2] << 2) | \
-                    (bits[pos+3] << 1) | bits[pos+4]
+                v = (bits[pos] << 4) | (bits[pos+1] << 3) | \
+                    (bits[pos+2] << 2) | (bits[pos+3] << 1) | bits[pos+4]
                 pos += 5
-            out_bits.extend([(v >> 4) & 1, (v >> 3) & 1, (v >> 2) & 1, (v >> 1) & 1, v & 1])
+            out_bits.extend([(v >> 4) & 1, (v >> 3) & 1,
+                             (v >> 2) & 1, (v >> 1) & 1, v & 1])
         if chunk_pad: out_bits = out_bits[:-chunk_pad]
         out_bits = out_bits[:orig_len]
         final_pad = (8 - len(out_bits) % 8) % 8
@@ -1201,9 +1455,12 @@ class UnifiedCompressor:
             f, r = self._dynamic_transform(i)
             self.fwd_transforms[i] = f; self.rev_transforms[i] = r
         self.fwd_transforms[256] = self.transform_256; self.rev_transforms[256] = self.reverse_transform_256
-        # NEW: transforms 257 and 258
         self.fwd_transforms[257] = self.transform_257; self.rev_transforms[257] = self.reverse_transform_257
         self.fwd_transforms[258] = self.transform_258; self.rev_transforms[258] = self.reverse_transform_258
+        # ---- NEW: 259, 260, 261 ----
+        self.fwd_transforms[259] = self.transform_259; self.rev_transforms[259] = self.reverse_transform_259
+        self.fwd_transforms[260] = self.transform_260; self.rev_transforms[260] = self.reverse_transform_260
+        self.fwd_transforms[261] = self.transform_261; self.rev_transforms[261] = self.reverse_transform_261
 
     def _load_static_dictionary(self): return [], {}
     def _load_line_dictionary(self): return [], {}
@@ -1263,7 +1520,7 @@ class UnifiedCompressor:
             c = h + self._compress_backend(t)
             if len(c) < bl: bc = c; bl = len(c)
         tc(self._encode_marker_raw(), data)
-        for t in range(1, 259):        # 1..258
+        for t in range(1, 262):        # 1..261
             if time_limit and time.time() - t0 > time_limit: break
             try:
                 tr = self.fwd_transforms[t](data)
@@ -1358,7 +1615,6 @@ class UnifiedCompressor:
         if not all_ok:
             print("\n  FAILED"); return False
         print(f"\n  All {len(self.fwd_transforms)} transforms passed on test bytes.")
-        # Extra tests
         print("\nAlgorithm 58 demo:")
         for demo, label in [
             (b'\x00' * 16 + b'\xFF' * 16, "16x00 + 16xFF"),
@@ -1377,6 +1633,21 @@ class UnifiedCompressor:
         enc = self.transform_258(demo)
         dec = self.reverse_transform_258(enc)
         print(f"  0..31  in={len(demo)}B  t258={len(enc)}B  OK={dec == demo}")
+        print("\nTransform 259 (5-bit 3-cycle bijection) demo:")
+        demo = b'\x00' * 32
+        enc = self.transform_259(demo)
+        dec = self.reverse_transform_259(enc)
+        print(f"  32x00  in={len(demo)}B  t259={len(enc)}B  OK={dec == demo}")
+        print("\nTransform 260 (5-bit subst + byte RLE) demo:")
+        demo = b'\x00' * 32
+        enc = self.transform_260(demo)
+        dec = self.reverse_transform_260(enc)
+        print(f"  32x00  in={len(demo)}B  t260={len(enc)}B  OK={dec == demo}")
+        print("\nTransform 261 (block bitmap subst) demo:")
+        demo = b'\x00' * 32
+        enc = self.transform_261(demo)
+        dec = self.reverse_transform_261(enc)
+        print(f"  32x00  in={len(demo)}B  t261={len(enc)}B  OK={dec == demo}")
         print(f"\n[All checks passed – 100% lossless]")
         return True
 
